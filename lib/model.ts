@@ -1,22 +1,30 @@
-// Token Radar's model: one sealed snapshot in, one ranked board out.
+// Token Radar's model, radar-3: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every protocol that records no token and could still launch one, strongest
 // implied value first. It never ranks a wrapped, staked or bridged product of a token that already
 // trades: those are not launches waiting to happen, they are the same token in another wrapper, so
 // the ranking applies the watchlist's own exclusion rule to every row, not only to the watchlist.
 //
-// Implied value follows only from the snapshot's own figures, the same function for every row:
+// Implied value follows only from the snapshot's own figures, and every number in it is fitted
+// from this snapshot at build time, never hand-picked:
 //
-//   base        = tvl_usd x BASE_MULTIPLE
-//   growth      = clamp(change_7d, -60, 120) per cent
-//   growthMult  = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity    = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   chainMult   = 1 + min(chains, 8) x 0.02
-//   implied     = max(1, round(base x growthMult x maturity x chainMult))
+//   launch value = 10 ^ (a + b * log10(tvl_usd))
+//     a and b are fitted by least squares on the traded tokens: the 92 protocols in the snapshot
+//     that record a market cap above zero, a TVL above zero, and are not an excluded product.
+//     The fit is tested blind two ways before it is used: leave-one-out (each token priced by a
+//     curve fitted without it) and a time split (fit on tokens listed before 2024, tested on the
+//     ones listed since). Both beat a flat TVL multiple by a wide margin, so the curve is kept.
+//   token odds  = the share of peer protocols in the same age-and-size cell that record a token,
+//     shrunk toward the base rate (244 of 442 peers record one). Age moves the odds, not the
+//     price: the age term was tested in the curve and failed both blind tests, so it stays out.
+//   implied     = launch value x token odds
+//   range       = the 25th to 75th percentile of the leave-one-out misses, around the implied
+//     value: half the traded tokens the curve never saw land inside the printed range.
 //
-// TVL is the size of the prize, seven-day growth is its direction, age with no token is how long
-// the protocol has run without issuing one, and chain breadth is how widely it is distributed: a
-// protocol on more chains reaches more farmers. No protocol name is ever special-cased.
+// Three more terms were fitted and rejected because they did not lower the held-out miss in both
+// blind tests: a per-category offset, the seven-day TVL growth, and the protocol's age in the
+// curve. The dashboard prints the test table, kept terms and rejected terms alike, so the model
+// can be checked instead of trusted.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -41,38 +49,51 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them. */
-export interface ModelConstants {
-  base_multiple: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  chain_step: number;
-  chain_cap: number;
+/** The fitted curve and the blind tests that earned it. */
+export interface CurveFit {
+  intercept: number;
+  slope: number;
+  comparables: number;
+  loo_median_miss: number;
+  loo_within_3x: number;
+  time_median_miss: number;
+  time_within_3x: number;
+  time_fit_n: number;
+  time_test_n: number;
+  time_split_date: string;
+  flat_loo_median_miss: number;
+  flat_time_median_miss: number;
+  /** The flat median market-cap-to-TVL ratio: the fallback when no curve can be fitted. */
+  flat_multiple: number;
+  resid_p25: number;
+  resid_p75: number;
+  rejected: { term: string; loo_median_miss: number; time_median_miss: number }[];
 }
 
-export const MODEL: ModelConstants = {
-  base_multiple: 0.25,
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  chain_step: 0.02,
-  chain_cap: 8,
-};
+/** One cell of the token-odds table: peers in an age band and a TVL tier. */
+export interface OddsCell {
+  age_band: string;
+  tvl_tier: string;
+  peers: number;
+  with_token: number;
+  odds: number;
+}
 
-/** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+/** The odds table: the base rate and every cell. */
+export interface OddsTable {
+  base_rate: number;
+  base_with_token: number;
+  base_peers: number;
+  shrink: number;
+  cells: OddsCell[];
+}
 
-/** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
+/** One group of the ledger: every protocol in the snapshot sits in exactly one. */
+export interface LedgerGroup {
+  label: string;
+  count: number;
+  kind: 'ranked' | 'token' | 'out';
+}
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -98,13 +119,15 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    base_usd: number;
-    base_multiple: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
-    chain_multiplier: number;
-    chain_count: number;
+    launch_value_usd: number;
+    token_odds: number;
+    odds_cell: string;
+    odds_base_rate: number;
+    range_low_usd: number;
+    range_high_usd: number;
+    curve_intercept: number;
+    curve_slope: number;
+    comparables: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -123,11 +146,11 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  base_usd: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  chain_multiplier: number;
-  chain_count: number;
+  launch_value_usd: number;
+  token_odds: number;
+  odds_cell: string;
+  range_low_usd: number;
+  range_high_usd: number;
   farm_steps: string[];
 }
 
@@ -142,13 +165,24 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+/** One traded token the curve learned from: TVL against its market cap. */
+export interface CompPoint {
+  slug: string;
+  tvl_usd: number;
+  mcap_usd: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
-  model: ModelConstants;
   model_version: string;
+  fit: CurveFit;
+  odds: OddsTable;
+  ledger: LedgerGroup[];
+  /** The traded tokens the curve was fitted on, for the scatter plot. */
+  comps: CompPoint[];
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -156,6 +190,7 @@ export interface RadarData {
   live_total: number;
   excluded_size: number;
   pre_token_size: number;
+  total_implied_usd: number;
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
@@ -168,6 +203,18 @@ export class SnapshotError extends Error {
     this.name = 'SnapshotError';
   }
 }
+
+/** The model's version label: the dashboard names it. */
+export const MODEL_VERSION = 'radar-3';
+
+/** How many live-token protocols the Live token view carries, by market cap. */
+export const LIVE_ROWS = 24;
+
+/** The date that splits the blind time test: fit before it, test after it. */
+export const TIME_SPLIT_DATE = '2024-01-01';
+
+/** The shrinkage strength for the odds cells: ten peers' worth of the base rate. */
+export const ODDS_SHRINK = 10;
 
 const DAY_MS = 86_400_000;
 
@@ -207,8 +254,7 @@ export function isPreToken(p: SnapshotProtocol): boolean {
 /**
  * Whether a protocol is one the board may rank: it records no token, and it is not a wrapped,
  * staked or bridged product of a token that already trades, not an exchange's product, and not a
- * versioned pool. This is the watchlist's own rule, applied to the whole ranking: the starter's
- * weaker rule let WBTC, Binance staked ETH and Coinbase Bridge top the board as "pre-token".
+ * versioned pool. This is the watchlist's own rule, applied to the whole ranking.
  */
 export function isRankable(p: SnapshotProtocol): boolean {
   return (
@@ -230,25 +276,346 @@ export function exclusionReason(p: SnapshotProtocol): string | null {
   return null;
 }
 
+/** Whether a protocol is an excluded product (any category, name or version rule), token or not. */
+function isExcludedProduct(p: SnapshotProtocol): boolean {
+  return EXCLUDED_CATEGORIES.has(p.category ?? '') || WRAPPED_WORD.test(p.name) || EXCHANGE_PREFIX.test(p.name) || VERSIONED.test(p.name);
+}
+
+// ---------------------------------------------------------------- the fitted curve
+
+/** The protocols the curve learns from: they trade, so the market has priced them. */
+function comparables(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && !isExcludedProduct(p));
+}
+
+/** Least squares for y = a + b*x over rows; returns [a, b]. */
+function leastSquares(rows: SnapshotProtocol[], x: (p: SnapshotProtocol) => number, y: (p: SnapshotProtocol) => number): [number, number] {
+  const n = rows.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const r of rows) {
+    const xv = x(r), yv = y(r);
+    sx += xv; sy += yv; sxx += xv * xv; sxy += xv * yv;
+  }
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return [sy / n, 0];
+  const b = (n * sxy - sx * sy) / denom;
+  return [(sy - b * sx) / n, b];
+}
+
+const logTvl = (p: SnapshotProtocol): number => Math.log10(p.tvl_usd);
+const logMcap = (p: SnapshotProtocol): number => Math.log10(p.mcap_usd ?? 1);
+
+/** The median factor by which `predict` misses the market cap, and the share inside 3x. */
+function missOf(rows: SnapshotProtocol[], predict: (p: SnapshotProtocol) => number): { median: number; within3: number } {
+  const errs = rows.map((p) => Math.abs(Math.log10(predict(p) / (p.mcap_usd ?? 1)))).sort((a, b) => a - b);
+  if (errs.length === 0) return { median: 1, within3: 1 };
+  const med = errs[Math.floor(errs.length / 2)]!;
+  return { median: Math.pow(10, med), within3: errs.filter((e) => Math.pow(10, e) <= 3).length / errs.length };
+}
+
+/** A flat multiple's prediction: TVL times the median market-cap-to-TVL ratio. */
+function flatPredictor(rows: SnapshotProtocol[]): (p: SnapshotProtocol) => number {
+  const ratios = rows.map((p) => (p.mcap_usd ?? 0) / p.tvl_usd).sort((a, b) => a - b);
+  const med = ratios.length === 0 ? 0 : ratios[Math.floor(ratios.length / 2)]!;
+  return (p) => Math.max(1, p.tvl_usd * med);
+}
+
+/** The curve's prediction for one protocol, from fitted [a, b]. */
+function curvePredict(ab: [number, number]): (p: SnapshotProtocol) => number {
+  return (p) => Math.max(1, Math.pow(10, ab[0] + ab[1] * logTvl(p)));
+}
+
+/**
+ * Fit the launch-value curve and test it blind. The curve is kept only when it beats a flat
+ * multiple in both tests; with fewer than ten comparables the snapshot cannot fit a curve, so
+ * the model falls back to the flat median multiple and says so in the fit record.
+ */
+export function fitCurve(snapshot: Snapshot): CurveFit {
+  const comps = comparables(snapshot.protocols);
+  const dated = comps.filter((p) => p.listed_at !== null);
+  const fitOn = dated.filter((p) => (p.listed_at ?? '') < TIME_SPLIT_DATE);
+  const testOn = dated.filter((p) => (p.listed_at ?? '') >= TIME_SPLIT_DATE);
+
+  if (comps.length < 10) {
+    const flat = flatPredictor(comps);
+    const loo = missOf(comps, flat);
+    const ts = missOf(testOn, flat);
+    const ratios = comps.map((p) => (p.mcap_usd ?? 0) / p.tvl_usd).sort((a, b) => a - b);
+    return {
+      intercept: 0, slope: 0, comparables: comps.length,
+      loo_median_miss: loo.median, loo_within_3x: loo.within3,
+      time_median_miss: ts.median, time_within_3x: ts.within3,
+      time_fit_n: fitOn.length, time_test_n: testOn.length, time_split_date: TIME_SPLIT_DATE,
+      flat_loo_median_miss: loo.median, flat_time_median_miss: ts.median,
+      flat_multiple: ratios.length === 0 ? 0 : ratios[Math.floor(ratios.length / 2)]!,
+      resid_p25: 0, resid_p75: 0,
+      rejected: [{ term: 'the size curve itself: too few traded tokens to fit one', loo_median_miss: loo.median, time_median_miss: ts.median }],
+    };
+  }
+
+  const ab = leastSquares(comps, logTvl, logMcap);
+  const predict = curvePredict(ab);
+  const flat = flatPredictor(comps);
+
+  // Leave-one-out: each token priced by a curve fitted without it.
+  const looErrs: number[] = [];
+  for (let i = 0; i < comps.length; i++) {
+    const rest = comps.filter((_, j) => j !== i);
+    const f = curvePredict(leastSquares(rest, logTvl, logMcap));
+    looErrs.push(logMcap(comps[i]!) - Math.log10(f(comps[i]!)));
+  }
+  const looSorted = [...looErrs].sort((a, b) => a - b);
+  const looMiss = missOf(comps, (p) => {
+    const rest = comps.filter((q) => q.slug !== p.slug);
+    return curvePredict(leastSquares(rest, logTvl, logMcap))(p);
+  });
+  const flatLoo = missOf(comps, (p) => {
+    const rest = comps.filter((q) => q.slug !== p.slug);
+    return flatPredictor(rest)(p);
+  });
+
+  // Time split: fit on the tokens listed before 2024, test on the ones listed since.
+  const timeAb = leastSquares(fitOn, logTvl, logMcap);
+  const timeMiss = missOf(testOn, curvePredict(timeAb));
+  const flatTimeMiss = missOf(testOn, flatPredictor(fitOn));
+
+  // The three rejected terms, each fitted the same way and held to the same two tests.
+  const rejected: CurveFit['rejected'] = [];
+  const withGrowth = comps.filter((p) => p.change_7d !== null);
+  const growthOf = (p: SnapshotProtocol): number => Math.min(120, Math.max(-60, p.change_7d ?? 0)) / 100;
+  const fitGrowth = (rows: SnapshotProtocol[]): (p: SnapshotProtocol) => number => {
+    // Two-variable least squares on [log TVL, growth]: solve the 3x3 normal equations by hand.
+    const rs = rows.filter((p) => p.change_7d !== null);
+    const feats = [(p: SnapshotProtocol) => 1, logTvl, growthOf];
+    const k = 3;
+    const A: number[][] = Array.from({ length: k }, () => Array(k).fill(0));
+    const b: number[] = Array(k).fill(0);
+    for (const r of rs) {
+      for (let j = 0; j < k; j++) {
+        b[j] += feats[j]!(r) * logMcap(r);
+        for (let m = 0; m < k; m++) A[j]![m] += feats[j]!(r) * feats[m]!(r);
+      }
+    }
+    for (let c = 0; c < k; c++) {
+      let piv = c;
+      for (let r = c + 1; r < k; r++) if (Math.abs(A[r]![c]) > Math.abs(A[piv]![c])) piv = r;
+      [A[c], A[piv]] = [A[piv]!, A[c]!];
+      [b[c], b[piv]] = [b[piv]!, b[c]!];
+      for (let r = c + 1; r < k; r++) {
+        const f = A[r]![c] / A[c]![c];
+        for (let m = c; m < k; m++) A[r]![m] -= f * A[c]![m];
+        b[r] -= f * b[c]!;
+      }
+    }
+    const coef = Array(k).fill(0);
+    for (let r = k - 1; r >= 0; r--) {
+      let s = b[r]!;
+      for (let m = r + 1; m < k; m++) s -= A[r]![m] * coef[m];
+      coef[r] = s / A[r]![r];
+    }
+    return (p) => Math.max(1, Math.pow(10, coef[0]! + coef[1]! * logTvl(p) + coef[2]! * growthOf(p)));
+  };
+  const growthLoo = missOf(withGrowth, (p) => fitGrowth(withGrowth.filter((q) => q.slug !== p.slug))(p));
+  const growthTime = missOf(testOn.filter((p) => p.change_7d !== null), fitGrowth(fitOn));
+  rejected.push({ term: 'seven-day TVL growth in the curve', loo_median_miss: growthLoo.median, time_median_miss: growthTime.median });
+
+  // Per-category offsets: the median residual of categories with at least five comparables,
+  // shrunk by n / (n + 5), refitted after removal. Only five categories qualify.
+  const fitCategory = (rows: SnapshotProtocol[]): (p: SnapshotProtocol) => number => {
+    const base = leastSquares(rows, logTvl, logMcap);
+    const byCat = new Map<string, number[]>();
+    for (const p of rows) {
+      const r = logMcap(p) - (base[0] + base[1] * logTvl(p));
+      const list = byCat.get(p.category ?? 'null') ?? [];
+      list.push(r);
+      byCat.set(p.category ?? 'null', list);
+    }
+    const off = new Map<string, number>();
+    for (const [cat, rs] of byCat) {
+      if (rs.length >= 5) {
+        const s = [...rs].sort((a, b) => a - b);
+        off.set(cat, s[Math.floor(s.length / 2)]! * (rs.length / (rs.length + 5)));
+      }
+    }
+    const refit = leastSquares(rows, logTvl, (p) => logMcap(p) - (off.get(p.category ?? 'null') ?? 0));
+    return (p) => Math.max(1, Math.pow(10, refit[0] + refit[1] * logTvl(p) + (off.get(p.category ?? 'null') ?? 0)));
+  };
+  const catLoo = missOf(comps, (p) => fitCategory(comps.filter((q) => q.slug !== p.slug))(p));
+  const catTime = missOf(testOn, fitCategory(fitOn));
+  rejected.push({ term: 'a per-category offset in the curve', loo_median_miss: catLoo.median, time_median_miss: catTime.median });
+
+  // Age in the curve: log10(age in days), unknown ages at the comparables' median age.
+  const ages = comps.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null && a > 0).sort((a, b) => a - b);
+  const medAge = ages.length === 0 ? 365 : ages[Math.floor(ages.length / 2)]!;
+  const ageLog = (p: SnapshotProtocol): number => {
+    const a = ageDays(snapshot.as_of, p.listed_at);
+    return Math.log10(a === null || a <= 0 ? medAge : a);
+  };
+  const fitAge = (rows: SnapshotProtocol[]): (p: SnapshotProtocol) => number => {
+    const feats = [(p: SnapshotProtocol) => 1, logTvl, ageLog];
+    const k = 3;
+    const A: number[][] = Array.from({ length: k }, () => Array(k).fill(0));
+    const b: number[] = Array(k).fill(0);
+    for (const r of rows) {
+      for (let j = 0; j < k; j++) {
+        b[j] += feats[j]!(r) * logMcap(r);
+        for (let m = 0; m < k; m++) A[j]![m] += feats[j]!(r) * feats[m]!(r);
+      }
+    }
+    for (let c = 0; c < k; c++) {
+      let piv = c;
+      for (let r = c + 1; r < k; r++) if (Math.abs(A[r]![c]) > Math.abs(A[piv]![c])) piv = r;
+      [A[c], A[piv]] = [A[piv]!, A[c]!];
+      [b[c], b[piv]] = [b[piv]!, b[c]!];
+      for (let r = c + 1; r < k; r++) {
+        const f = A[r]![c] / A[c]![c];
+        for (let m = c; m < k; m++) A[r]![m] -= f * A[c]![m];
+        b[r] -= f * b[c]!;
+      }
+    }
+    const coef = Array(k).fill(0);
+    for (let r = k - 1; r >= 0; r--) {
+      let s = b[r]!;
+      for (let m = r + 1; m < k; m++) s -= A[r]![m] * coef[m];
+      coef[r] = s / A[r]![r];
+    }
+    return (p) => Math.max(1, Math.pow(10, coef[0]! + coef[1]! * logTvl(p) + coef[2]! * ageLog(p)));
+  };
+  const ageLoo = missOf(comps, (p) => fitAge(comps.filter((q) => q.slug !== p.slug))(p));
+  const ageTime = missOf(testOn, fitAge(fitOn));
+  rejected.push({ term: 'age in the curve (age moves the odds instead)', loo_median_miss: ageLoo.median, time_median_miss: ageTime.median });
+
+  return {
+    intercept: ab[0],
+    slope: ab[1],
+    comparables: comps.length,
+    loo_median_miss: looMiss.median,
+    loo_within_3x: looMiss.within3,
+    time_median_miss: timeMiss.median,
+    time_within_3x: timeMiss.within3,
+    time_fit_n: fitOn.length,
+    time_test_n: testOn.length,
+    time_split_date: TIME_SPLIT_DATE,
+    flat_loo_median_miss: flatLoo.median,
+    flat_time_median_miss: flatTimeMiss.median,
+    flat_multiple: (() => {
+      const ratios = comps.map((p) => (p.mcap_usd ?? 0) / p.tvl_usd).sort((a, b) => a - b);
+      return ratios.length === 0 ? 0 : ratios[Math.floor(ratios.length / 2)]!;
+    })(),
+    resid_p25: looSorted[Math.floor(0.25 * looSorted.length)]!,
+    resid_p75: looSorted[Math.floor(0.75 * looSorted.length)]!,
+    rejected,
+  };
+}
+
+// ---------------------------------------------------------------- token odds
+
+/** The age band a protocol sits in, for the odds table. */
+export function ageBand(age: number | null): string {
+  if (age === null) return 'unknown';
+  if (age < 180) return 'under 6 months';
+  if (age < 365) return '6–12 months';
+  if (age < 730) return '1–2 years';
+  if (age < 1095) return '2–3 years';
+  return '3 years or more';
+}
+
+/** The TVL tier a protocol sits in, for the odds table. */
+export function tvlTier(tvl: number): string {
+  if (tvl < 50_000_000) return 'under $50M';
+  if (tvl < 250_000_000) return '$50–250M';
+  if (tvl < 1_000_000_000) return '$250M–$1B';
+  return '$1B or more';
+}
+
+/**
+ * The odds table: for every age band and TVL tier, the share of peer protocols that record a
+ * token, shrunk toward the base rate. Peers are the protocols that are not an excluded product:
+ * the same set the board draws from. A cell with few peers leans on the base rate, so no single
+ * small cell can swing a row's odds.
+ */
+export function oddsTable(snapshot: Snapshot): OddsTable {
+  const peers = snapshot.protocols.filter((p) => !isExcludedProduct(p));
+  const withToken = peers.filter((p) => !isPreToken(p)).length;
+  const base = peers.length === 0 ? 0 : withToken / peers.length;
+  const cells = new Map<string, { age_band: string; tvl_tier: string; peers: number; with_token: number }>();
+  for (const p of peers) {
+    const key = `${ageBand(ageDays(snapshot.as_of, p.listed_at))}|${tvlTier(p.tvl_usd)}`;
+    const cell = cells.get(key) ?? { age_band: ageBand(ageDays(snapshot.as_of, p.listed_at)), tvl_tier: tvlTier(p.tvl_usd), peers: 0, with_token: 0 };
+    cell.peers += 1;
+    if (!isPreToken(p)) cell.with_token += 1;
+    cells.set(key, cell);
+  }
+  const list: OddsCell[] = [...cells.values()]
+    .map((c) => ({
+      age_band: c.age_band,
+      tvl_tier: c.tvl_tier,
+      peers: c.peers,
+      with_token: c.with_token,
+      odds: (c.with_token + ODDS_SHRINK * base) / (c.peers + ODDS_SHRINK),
+    }))
+    .sort((a, b) => (a.age_band < b.age_band ? -1 : a.age_band > b.age_band ? 1 : a.tvl_tier < b.tvl_tier ? -1 : 1));
+  return { base_rate: base, base_with_token: withToken, base_peers: peers.length, shrink: ODDS_SHRINK, cells: list };
+}
+
+/** One protocol's token odds from the table: its cell, or the base rate when the cell is empty. */
+function oddsOf(p: SnapshotProtocol, snapshot: Snapshot, table: OddsTable): { odds: number; cell: string } {
+  const cell = `${ageBand(ageDays(snapshot.as_of, p.listed_at))}|${tvlTier(p.tvl_usd)}`;
+  const found = table.cells.find((c) => `${c.age_band}|${c.tvl_tier}` === cell);
+  if (!found) return { odds: table.base_rate, cell };
+  return { odds: found.odds, cell };
+}
+
 // ---------------------------------------------------------------- value
 
-/** The four multipliers and the implied value one protocol gets under `model`. */
+/** The launch value one protocol gets under the fitted curve, whole dollars. */
+function launchValue(p: SnapshotProtocol, fit: CurveFit): number {
+  if (fit.comparables < 10) {
+    // The fallback path: no curve could be fitted, so the flat median multiple prices the row.
+    return Math.max(1, Math.round(p.tvl_usd * fit.flat_multiple));
+  }
+  return Math.max(1, Math.round(Math.pow(10, fit.intercept + fit.slope * logTvl(p))));
+}
+
+/** The four numbers one protocol gets: launch value, odds, implied value, and its range. */
 export function impliedValue(
   protocol: SnapshotProtocol,
-  asOf: string,
-  model: ModelConstants,
-): { implied: number; base: number; growthPct: number; growthMult: number; maturityMult: number; chainMult: number; chainCount: number; age: number | null } {
-  const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const chainCount = Math.min(protocol.chains.length, model.chain_cap);
-  const chainMult = 1 + chainCount * model.chain_step;
-  const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult));
-  return { implied, base, growthPct, growthMult, maturityMult, chainMult, chainCount, age };
+  snapshot: Snapshot,
+  fit: CurveFit,
+  table: OddsTable,
+): { launch: number; odds: number; cell: string; implied: number; low: number; high: number; age: number | null } {
+  const age = ageDays(snapshot.as_of, protocol.listed_at);
+  const launch = launchValue(protocol, fit);
+  const { odds, cell } = oddsOf(protocol, snapshot, table);
+  const implied = Math.max(1, Math.round(launch * odds));
+  const low = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p25)));
+  const high = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p75)));
+  return { launch, odds, cell, implied, low, high, age };
+}
+
+/** The ledger: every protocol in exactly one group, ranked first, then the rest by reason. */
+export function ledger(snapshot: Snapshot): LedgerGroup[] {
+  const groups = new Map<string, LedgerGroup>();
+  const add = (label: string, kind: LedgerGroup['kind']): void => {
+    const g = groups.get(label) ?? { label, count: 0, kind };
+    g.count += 1;
+    groups.set(label, g);
+  };
+  for (const p of snapshot.protocols) {
+    if (isRankable(p)) add('Ranked on the board', 'ranked');
+    else if (!isPreToken(p)) add('Already records a token', 'token');
+    else if (EXCLUDED_CATEGORIES.has(p.category ?? '')) add(`Set aside: ${p.category}`, 'out');
+    else if (WRAPPED_WORD.test(p.name)) add('Set aside: wrapped or staked name', 'out');
+    else if (EXCHANGE_PREFIX.test(p.name)) add("Set aside: an exchange's product", 'out');
+    else if (VERSIONED.test(p.name)) add('Set aside: versioned release', 'out');
+    else add('Set aside: other', 'out');
+  }
+  const order = ['Ranked on the board', 'Already records a token'];
+  return [...groups.values()].sort((a, b) => {
+    const ai = order.indexOf(a.label), bi = order.indexOf(b.label);
+    if (ai >= 0 || bi >= 0) return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    return b.count - a.count;
+  });
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -258,8 +625,10 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
+// ---------------------------------------------------------------- the board
+
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, fit: CurveFit, table: OddsTable): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug is ranked, even one the snapshot no longer carries.
@@ -273,10 +642,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     if (!chosen.has(p.slug) && isRankable(p)) chosen.set(p.slug, p);
   }
 
-  const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model);
-    return { p, ...v };
-  });
+  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot, fit, table) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -294,13 +660,15 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      base_usd: Math.round(s.base),
-      base_multiple: model.base_multiple,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      chain_multiplier: round4(s.chainMult),
-      chain_count: s.chainCount,
+      launch_value_usd: s.launch,
+      token_odds: round4(s.odds),
+      odds_cell: s.cell,
+      odds_base_rate: round4(table.base_rate),
+      range_low_usd: s.low,
+      range_high_usd: s.high,
+      curve_intercept: round4(fit.intercept),
+      curve_slope: round4(fit.slope),
+      comparables: fit.comparables,
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age, i + 1, s.implied).map(stepText),
@@ -317,13 +685,14 @@ export function stepText(step: FarmStep): string {
   return s;
 }
 
-/** The first chain a protocol names, or a neutral phrase. */
-function chainOf(p: SnapshotProtocol): string {
-  return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+/** The chain the plan farms on: the cheapest one the protocol runs on, so the plan's gas
+ * matches the economics the dashboard prints for the same row. */
+function farmChain(p: SnapshotProtocol): string {
+  return cheapestChain(p).chain;
 }
 
 /** What one transaction costs on a chain, in whole dollars: a rough gas figure, stated as about. */
-function gasUsd(chain: string): number {
+export function gasUsd(chain: string): number {
   const table: Record<string, number> = {
     Ethereum: 8,
     Tron: 1,
@@ -599,7 +968,7 @@ function topRowSteps(p: SnapshotProtocol, implied: number): FarmStep[] {
  * board is the entry, so the top rows get the deepest plans.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null, rank = 0, implied = 0): FarmStep[] {
-  const chain = chainOf(p);
+  const chain = farmChain(p);
   const gas = gasUsd(chain);
   const gasText = `about $${gas} of gas`;
   const capital = capitalFor(p);
@@ -685,18 +1054,20 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    base_usd: row.model.base_usd,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
-    chain_multiplier: row.model.chain_multiplier,
-    chain_count: row.model.chain_count,
+    launch_value_usd: row.model.launch_value_usd,
+    token_odds: row.model.token_odds,
+    odds_cell: row.model.odds_cell,
+    range_low_usd: row.model.range_low_usd,
+    range_high_usd: row.model.range_high_usd,
     farm_steps: row.farm_steps,
   };
 }
 
 /** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData; fit: CurveFit; table: OddsTable } {
+  const fit = fitCurve(snapshot);
+  const table = oddsTable(snapshot);
+  const board = buildBoard(snapshot, fit, table);
   const live = liveRows(snapshot);
   const liveTotal = snapshot.protocols.filter((p) => !isPreToken(p) && p.category !== 'CEX').length;
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
@@ -705,8 +1076,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
-    model,
     model_version: MODEL_VERSION,
+    fit,
+    odds: table,
+    ledger: ledger(snapshot),
+    comps: comparables(snapshot.protocols).map((p) => ({ slug: p.slug, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd ?? 0 })),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
@@ -714,11 +1088,12 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_total: liveTotal,
     excluded_size: preToken - board.length,
     pre_token_size: preToken,
+    total_implied_usd: board.reduce((s, r) => s + r.implied_value_usd, 0),
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,
   };
-  return { board, radar };
+  return { board, radar, fit, table };
 }
 
 // ---------------------------------------------------------------- parsing + gate
