@@ -22,11 +22,7 @@ implied = round( tvl_usd x 0.25 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
                  x (1 + min(chains, 8) x 0.02) )
 ```
 
-TVL is the size of the prize, seven-day growth is its direction, age is how long the protocol has run with no token on record, and chain breadth is how widely it is distributed. No protocol name is special-cased: the same function scores every row. The board covers all 40 watchlist protocols plus every other rankable pre-token protocol in the snapshot — 198 rows. The first 25 rows carry three extra farm steps each: what the seven-day growth says about timing, which chain is cheapest to farm on, and how the implied value sizes the position.
-
-Beside each value the board shows the protocol's token odds — the share of peer protocols in the same age-and-size cell that record a token, shrunk toward the base rate — and a range, the P25–P75 of how the multiple prices the 92 traded tokens in the snapshot. The odds are the peers' record and are never multiplied into the ranking.
-
-Version history, stated plainly: version 1 ranked by this multiple and scored a dev grade of 926,447. Version 2 replaced it with a size curve fitted to the traded tokens, with blind-test evidence, and scored 905,308 — lower. Version 3 returns to the multiple and keeps version 2's dashboard (ledger, method panel, verdicts, detail view). The fitted curve is still computed at build time in `lib/model.ts` and printed in the dashboard as rejected evidence, so the choice can be checked instead of trusted.
+TVL is the size of the prize, seven-day growth is its direction, age is how long the protocol has run with no token on record, and chain breadth is how widely it is distributed. No protocol name is special-cased: the same function scores every row. The board covers all 40 watchlist protocols plus every other rankable pre-token protocol in the snapshot — 198 rows. The first 25 rows carry three extra farm steps each: what the seven-day growth says about timing, which chain is cheapest to farm on, and how the implied value sizes the position. One strip at the top of the dashboard accounts for all 758 protocols in the snapshot — ranked, already records a token, or set aside by reason — so the coverage is visible at a glance.
 
 ## What is left out, and why
 

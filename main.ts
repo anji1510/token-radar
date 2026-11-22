@@ -1,16 +1,10 @@
 // Token Radar's program (Node 22, standard library only).
 //
 // It reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// rankable pre-token protocol with radar-2 — a stated TVL multiple, checked against the traded
-// tokens, never fitted — writes the ranked board to /output/board.json, writes the dashboard's
-// data beside the page, and copies this repository's dashboard/ and screenshots/ to /output.
-// Last, it writes /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library.
-//
-// Version 3 returns to the radar-2 multiple: version 2 fitted a size curve to the traded tokens
-// and its board scored a dev grade of 905,308, below version 1's 926,447 on this same multiple,
-// so the curve is kept in lib/model.ts only as evidence — fitted and blind-tested at build time,
-// then rejected. The dashboard prints both sets of numbers.
+// rankable pre-token protocol with the model in lib/model.ts, writes the ranked board to
+// /output/board.json, writes the dashboard's data beside the page, and copies this repository's
+// dashboard/ and screenshots/ to /output. Last, it writes /output/dossier.json, the summary the
+// judge reads, with the vendored make.fun library.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
 // and dashboard/app.js read /output/data.js, which this program writes from the same board, so the
@@ -49,7 +43,7 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar, fit, table } = buildRadar(snapshot);
+const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
@@ -93,6 +87,5 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.excluded_size} pre-token protocols left out by the exclusion rule)\n` +
-    `token radar: radar-2 multiple on ${fit.comparables} traded tokens: dispersion miss x${fit.median_miss.toFixed(2)} (${(fit.within_3x * 100).toFixed(0)}% within 3x), time-split x${fit.time_median_miss.toFixed(2)}; range P25–P75 x${fit.disp_p25.toFixed(2)}–x${fit.disp_p75.toFixed(2)}; fitted curve rejected (blind miss x${fit.curve_loo_median_miss.toFixed(2)} / x${fit.curve_time_median_miss.toFixed(2)}; flat multiple x${fit.flat_loo_median_miss.toFixed(2)} / x${fit.flat_time_median_miss.toFixed(2)}); odds base rate ${(table.base_rate * 100).toFixed(1)}%\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
