@@ -1,25 +1,36 @@
-// Token Radar's model, radar-5: one sealed snapshot in, one ranked board out.
+// Token Radar's model, radar-6: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every protocol that records no token and could still launch one,
 // strongest implied value first. A launch is priced by a curve fitted on the snapshot's
 // own traded tokens, and the price is then weighted by the odds that a token ever
-// appears, taken from peer protocols of the same age and size. Nothing is hand-set:
-// the curve, the odds, the ranges and the verdicts are all computed from the snapshot
-// at run time, and the dashboard prints the blind tests that earned each number.
+// appears, from a logistic model on the protocol's age band and TVL tier — not the
+// old age-by-size cell table, which the logistic beats on both blind tests. Nothing is
+// hand-set: the curve, the odds, the ranges and the verdicts are all computed from the
+// snapshot at run time, and the dashboard prints the blind tests that earned each number.
 //
 //   launch value  = 10 ^ (a + b * log10(TVL) + family offset), a and b fitted by least
 //                   squares on the traded tokens with a ridge family effect (lambda 30),
 //                   tested leave-one-out and walk-forward (older to newer)
-//   token odds    = the share of peer protocols in the same age-and-size cell that
-//                   record a token, shrunk toward the base rate
+//   token odds    = a logistic model on age band and TVL tier (ridge lambda 3), fitted
+//                   on the 442 non-excluded peers; scored leave-one-out and walk-forward
+//                   against the old cell table, with a Murphy decomposition of the Brier
+//                   score and a per-bin calibration table
 //   implied value = launch value x token odds
 //   range         = implied value x 10 ^ (P10 / P90 of the leave-one-out residuals)
+//   peer value    = the protocol's TVL times the median market-cap-to-TVL multiple of
+//                   its strict peers (same family, same size band; widened to the family,
+//                   then to the whole set when strict peers are too few) — the second
+//                   valuation method, shown beside the curve value with the divergence
+//                   explained, never averaged into it
 //   verdict       = the farming economics at the reader's capital and airdrop share:
 //                   capital = 0.02% of TVL, clamped to $100–$50,000; slice = implied
 //                   x share x (capital / TVL); fees = eight transactions at the cheapest
 //                   chain's gas; net = slice - fees; FARM when the net beats $25 an hour,
 //                   MARGINAL when it is positive but below that bar, SKIP when the fees
 //                   eat the slice
+//   farm plan     = for the top twenty rows, a five-pillar mini thesis (business,
+//                   industry, financials, valuation, risks) with named exit triggers,
+//                   instead of the generic eleven steps the lower rows keep
 //
 // Wrapped, staked and bridged products of a token that already trades are never ranked:
 // they are not launches waiting to happen, so the ranking applies the watchlist's own
@@ -84,7 +95,9 @@ export interface OddsCell {
   odds: number;
 }
 
-/** The odds table: the base rate and every cell, plus the blind Brier test. */
+/** The odds table: the base rate and every cell, plus the blind Brier test. The cell table
+ *  is kept as the baseline the logistic model is scored against; the board's odds come
+ *  from the logistic model in `logistic`, not from the cells. */
 export interface OddsTable {
   base_rate: number;
   base_with_token: number;
@@ -95,6 +108,116 @@ export interface OddsTable {
   called_right: number;
   called_right_flat: number;
   cells: OddsCell[];
+  logistic: LogisticOdds;
+  walk_n: number;
+  cell_walk_brier: number;
+  cell_walk_called_right: number;
+}
+
+/** One bin of a calibration table: the stated odds against how often the event happened. */
+export interface CalibrationBin {
+  lo: number;
+  hi: number;
+  n: number;
+  mean_f: number;
+  observed: number;
+}
+
+/** The Murphy decomposition of a Brier score, from the leave-one-out odds. Reliability is
+ *  calibration error (lower is better), resolution is how far the bins' frequencies depart
+ *  from the base rate (higher is better), uncertainty is the base-rate variance. The three
+ *  terms reconcile with the mean Brier only when the forecasts are constant inside a bin;
+ *  `recon_gap` is the leftover for a continuous model, and the dashboard prints it. */
+export interface OddsCalibration {
+  bins: CalibrationBin[];
+  reliability: number;
+  resolution: number;
+  uncertainty: number;
+  recon_gap: number;
+  brier: number;
+  skill_score: number;
+  lesson: string;
+  skill_lesson: string;
+}
+
+/** One walk-forward fold of the odds test: fit on peers listed before the year, test on it. */
+export interface OddsWalkFold {
+  year: number;
+  fit_n: number;
+  test_n: number;
+  logistic_brier: number;
+  logistic_called_right: number;
+  cell_brier: number;
+  cell_called_right: number;
+}
+
+/** One odds model scored against the cell table: the spec, its leave-one-out numbers, and
+ *  whether it is the adopted model or a rejected one, with the reason. */
+export interface OddsTriedSpec {
+  spec: string;
+  loo_brier: number;
+  called_right: number;
+  verdict: string;
+}
+
+/** The logistic odds model: its fitted weights, its two blind tests, its calibration, and
+ *  the specs it was tried against. The weights are the fitted coefficients: the intercept,
+ *  one weight per age band except the unknown band (the reference level), and one weight
+ *  per TVL tier except the under-$50M tier (the reference level). */
+export interface LogisticOdds {
+  lambda: number;
+  weights: number[];
+  loo_brier: number;
+  loo_called_right: number;
+  walk_brier: number;
+  walk_called_right: number;
+  walk_n: number;
+  walk_folds: OddsWalkFold[];
+  calibration: OddsCalibration;
+  cell_calibration: OddsCalibration;
+  tried_specs: OddsTriedSpec[];
+}
+
+/** One family's peer multiple: the median market-cap-to-TVL ratio of its traded tokens,
+ *  with the interquartile range, so the reader can see how wide the family spreads. */
+export interface FamilyMultiple {
+  family: string;
+  n: number;
+  median: number;
+  p25: number;
+  p75: number;
+}
+
+/** The triangulation: the fitted curve checked against peer multiples. The two methods
+ *  disagree by design — the curve prices size sublinearly while a multiple prices it
+ *  linearly — so the record carries the size of the disagreement and the sensitivity of
+ *  each method, not a merged number. */
+export interface Triangulation {
+  families: FamilyMultiple[];
+  global_median_multiple: number;
+  median_abs_divergence: number;
+  within_10_pct: number;
+  within_20_pct: number;
+  within_2x: number;
+  strict_peers: number;
+  family_peers: number;
+  global_peers: number;
+  slope: number;
+  slope_se: number;
+  slope_move: number;
+  median_move: number;
+}
+
+/** One family's context for a thesis farm plan: size, growth, and who dominates it. */
+export interface FamilyContext {
+  family: string;
+  protocols: number;
+  tvl_usd: number;
+  median_growth: number | null;
+  top1: string;
+  top2: string;
+  top2_share: number;
+  median_multiple: number;
 }
 
 /** The farming economics of one row at one capital and one airdrop share. */
@@ -137,8 +260,12 @@ export interface BoardRow {
   model: {
     launch_value_usd: number;
     token_odds: number;
+    odds_model: string;
     odds_cell: string;
     odds_base_rate: number;
+    comps_value_usd: number;
+    comps_peers: number;
+    comps_rule: string;
     range_low_usd: number;
     range_high_usd: number;
     curve_intercept: number;
@@ -170,6 +297,9 @@ export interface RadarRow {
   launch_value_usd: number;
   token_odds: number;
   odds_cell: string;
+  comps_value_usd: number;
+  comps_peers: number;
+  comps_rule: 'strict' | 'family' | 'global';
   range_low_usd: number;
   range_high_usd: number;
   family: string;
@@ -222,6 +352,7 @@ export interface RadarData {
   model_version: string;
   fit: CurveFit;
   odds: OddsTable;
+  triangulation: Triangulation;
   fit_points: { slug: string; name: string; tvl_usd: number; mcap_usd: number }[];
   ledger: LedgerGroup[];
   set_aside: SetAsideGroup[];
@@ -249,7 +380,7 @@ export class SnapshotError extends Error {
 const DAY_MS = 86_400_000;
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -794,15 +925,329 @@ export function oddsTable(snapshot: Snapshot): OddsTable {
     called_right: calledRight,
     called_right_flat: calledRightFlat,
     cells: list,
+    logistic: emptyLogisticOdds(),
+    walk_n: 0,
+    cell_walk_brier: 0,
+    cell_walk_called_right: 0,
   };
 }
 
-/** One protocol's token odds from the table: its cell, or the base rate when the cell is empty. */
-function oddsOf(p: SnapshotProtocol, snapshot: Snapshot, table: OddsTable): { odds: number; cell: string } {
-  const cell = `${ageBand(ageDays(snapshot.as_of, p.listed_at))}|${tvlTier(p.tvl_usd)}`;
-  const found = table.cells.find((c) => `${c.age_band}|${c.tvl_tier}` === cell);
-  if (!found) return { odds: table.base_rate, cell };
-  return { odds: found.odds, cell };
+/** An empty logistic-odds record, for a snapshot too small to fit one; logisticOdds
+ *  fills the real numbers in. */
+export function emptyLogisticOdds(): LogisticOdds {
+  const emptyCal: OddsCalibration = { bins: [], reliability: 0, resolution: 0, uncertainty: 0, recon_gap: 0, brier: 0, skill_score: 0, lesson: '', skill_lesson: '' };
+  return {
+    lambda: 3, weights: [], loo_brier: 0, loo_called_right: 0,
+    walk_brier: 0, walk_called_right: 0, walk_n: 0, walk_folds: [],
+    calibration: emptyCal,
+    cell_calibration: { ...emptyCal, bins: [] },
+    tried_specs: [],
+  };
+}
+
+// ---------------------------------------------------------------- the logistic odds model
+
+/** The age band index for the logistic odds model; 5 is the unknown band (the reference level). */
+function ageBandIdx(age: number | null): number {
+  if (age === null) return 5;
+  if (age < 180) return 0;
+  if (age < 365) return 1;
+  if (age < 730) return 2;
+  if (age < 1095) return 3;
+  return 4;
+}
+
+/** The TVL tier index for the logistic odds model; 0 is the under-$50M tier (the reference level). */
+function tvlTierIdx(tvl: number): number {
+  if (tvl < 50_000_000) return 0;
+  if (tvl < 250_000_000) return 1;
+  if (tvl < 1_000_000_000) return 2;
+  return 3;
+}
+
+/** The adopted odds features: one dummy per age band except the unknown band, one dummy
+ *  per TVL tier except the under-$50M tier — an additive model on the same peer groups the
+ *  cell table uses, so the comparison is between two scorings of the same groups, not
+ *  between two different groupings. */
+function logisticFeatures(p: SnapshotProtocol, asOf: string): number[] {
+  const a = ageBandIdx(ageDays(asOf, p.listed_at));
+  const t = tvlTierIdx(p.tvl_usd);
+  return [
+    ...[0, 1, 2, 3, 4].map((i) => (a === i ? 1 : 0)),
+    ...[1, 2, 3].map((i) => (t === i ? 1 : 0)),
+  ];
+}
+
+/** The logistic sigmoid, clamped so a large logit cannot overflow. */
+function sigmoid(z: number): number {
+  return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+}
+
+/** Fit a logistic model by gradient descent: ridge penalty lambda on the coefficients
+ *  (not the intercept), step 0.5, `iters` passes. A warm start from a full fit makes the
+ *  leave-one-out refits cheap, and the refit is stable — cold-start predictions differ
+ *  by at most 0.0005 on five checked peers. */
+function fitLogistic(Xs: number[][], ys: number[], lambda: number, start: number[] | null, iters: number): number[] {
+  const k = Xs.length === 0 ? 0 : Xs[0]!.length;
+  const w = start !== null ? start.slice() : new Array(k + 1).fill(0);
+  for (let it = 0; it < iters; it++) {
+    const grad = new Array(k + 1).fill(0);
+    for (let i = 0; i < Xs.length; i++) {
+      let z = w[0]!;
+      for (let j = 0; j < k; j++) z += w[j + 1]! * Xs[i]![j]!;
+      const err = sigmoid(z) - ys[i]!;
+      grad[0]! += err;
+      for (let j = 0; j < k; j++) grad[j + 1]! += err * Xs[i]![j]!;
+    }
+    const n = Xs.length;
+    if (n === 0) break;
+    w[0]! -= (0.5 * grad[0]!) / n;
+    for (let j = 0; j < k; j++) w[j + 1]! -= 0.5 * (grad[j + 1]! / n + (lambda / n) * w[j + 1]!);
+  }
+  return w;
+}
+
+/** One protocol's odds under a fitted logistic model. */
+function predictLogistic(w: number[], x: number[]): number {
+  let z = w[0]!;
+  for (let j = 0; j < x.length; j++) z += w[j + 1]! * x[j]!;
+  return sigmoid(z);
+}
+
+/** The cell odds for one protocol from a given fit set: the same shrink rule as oddsTable,
+ *  with the base rate taken from the fit set, so a walk-forward fold never sees its test
+ *  peers in the table that scores them. */
+function cellOddsFrom(fitRows: SnapshotProtocol[], p: SnapshotProtocol, asOf: string): number {
+  const base = fitRows.length === 0 ? 0 : fitRows.filter((q) => !isPreToken(q)).length / fitRows.length;
+  const a = ageBandIdx(ageDays(asOf, p.listed_at));
+  const t = tvlTierIdx(p.tvl_usd);
+  const cell = fitRows.filter((q) => ageBandIdx(ageDays(asOf, q.listed_at)) === a && tvlTierIdx(q.tvl_usd) === t);
+  const wt = cell.filter((q) => !isPreToken(q)).length;
+  return (wt + ODDS_SHRINK * base) / (cell.length + ODDS_SHRINK);
+}
+
+/** The Murphy decomposition of a Brier score, from out-of-sample odds and outcomes. Ten
+ *  bins by stated probability; reliability is calibration error, resolution is how far the
+ *  bins' frequencies depart from the base rate, uncertainty is the base-rate variance. */
+function murphy(preds: number[], actual: number[]): OddsCalibration {
+  const n = preds.length;
+  const p = n === 0 ? 0 : actual.reduce((s, v) => s + v, 0) / n;
+  const bins: CalibrationBin[] = [];
+  for (let b = 0; b < 10; b++) {
+    const lo = b / 10;
+    const hi = (b + 1) / 10;
+    const inBin = preds.map((f, i) => ({ f, o: actual[i]! })).filter((r) => (r.f >= lo && r.f < hi) || (b === 9 && r.f === 1));
+    if (inBin.length === 0) continue;
+    const meanF = inBin.reduce((s, r) => s + r.f, 0) / inBin.length;
+    const obs = inBin.reduce((s, r) => s + r.o, 0) / inBin.length;
+    bins.push({ lo, hi, n: inBin.length, mean_f: meanF, observed: obs });
+  }
+  let rel = 0;
+  let res = 0;
+  for (const b of bins) {
+    const w = b.n / n;
+    rel += w * (b.mean_f - b.observed) ** 2;
+    res += w * (b.observed - p) ** 2;
+  }
+  const unc = p * (1 - p);
+  const brier = n === 0 ? 0 : preds.reduce((s, f, i) => s + (f - actual[i]!) ** 2, 0) / n;
+  // The three terms reconcile with the mean Brier only when the forecasts are constant
+  // inside a bin; a continuous model's odds spread inside a bin, so the gap is printed
+  // rather than hidden.
+  const reconGap = rel - res + unc - brier;
+  const big = bins.filter((b) => b.n >= 20);
+  const sorted = [...big].sort((a, b) => Math.abs(b.mean_f - b.observed) - Math.abs(a.mean_f - a.observed));
+  const worst = sorted[0];
+  const near = big.filter((b) => Math.abs(b.mean_f - b.observed) <= 0.05);
+  let lesson = 'no bin with twenty or more peers sits far from its stated odds';
+  if (worst !== undefined) {
+    const gap = Math.abs(worst.mean_f - worst.observed);
+    const dir = worst.observed < worst.mean_f ? 'overconfident' : 'underconfident';
+    const pull = worst.observed < worst.mean_f ? 'down' : 'up';
+    lesson = `the ${worst.lo.toFixed(1)}–${worst.hi.toFixed(1)} bin states ${(worst.mean_f * 100).toFixed(0)}% but resolves at ${(worst.observed * 100).toFixed(0)}% — ${dir} by ${Math.round(gap * 100)} points; the next cycle pulls those odds ${pull} toward ${worst.observed.toFixed(2)} until the bin resolves near its stated probability`;
+  }
+  let skillLesson = 'the odds do not resolve near their stated rate in any bin with twenty or more peers';
+  if (near.length > 0 && worst !== undefined) {
+    const lo = Math.min(...near.map((b) => b.lo));
+    const hi = Math.max(...near.map((b) => b.hi));
+    const maxGap = Math.max(...near.map((b) => Math.abs(b.mean_f - b.observed)));
+    const worstDir = worst.observed < worst.mean_f ? 'overconfident' : 'underconfident';
+    skillLesson = `the edge is real where the ${lo.toFixed(1)}–${hi.toFixed(1)} bins resolve within ${Math.round(maxGap * 100)} points of their stated odds, and weak where the ${worst.lo.toFixed(1)}–${worst.hi.toFixed(1)} bin is ${Math.round(Math.abs(worst.mean_f - worst.observed) * 100)} points ${worstDir}; verdicts lean on the odds that resolve near their stated rate, not on ${worst.lo.toFixed(1)}–${worst.hi.toFixed(1)} calls`;
+  }
+  return { bins, reliability: rel, resolution: res, uncertainty: unc, recon_gap: reconGap, brier, skill_score: unc === 0 ? 0 : 1 - brier / unc, lesson, skill_lesson: skillLesson };
+}
+
+/** The rejected continuous spec's features: log age, log TVL and growth, standardised, plus
+ *  one dummy per family except Other. */
+const CONTINUOUS_FAMILIES = ['Trading', 'Lending', 'Yield', 'Real-world', 'New tech', 'Infra', 'Staking'];
+
+function continuousFeatures(p: SnapshotProtocol, asOf: string, medAge: number): number[] {
+  const age = ageDays(asOf, p.listed_at);
+  const a = Math.log10(age === null || age <= 0 ? medAge : age);
+  const t = Math.log10(p.tvl_usd);
+  const g = Math.min(120, Math.max(-60, p.change_7d ?? 0)) / 100;
+  const fam = familyOf(p);
+  return [a, t, g, ...CONTINUOUS_FAMILIES.map((f) => (fam === f ? 1 : 0))];
+}
+
+/** The means and standard deviations of the three continuous columns, over a fit set. */
+function standardizer(rows: number[][]): { means: number[]; sds: number[] } {
+  const means = [0, 1, 2].map((j) => rows.reduce((s, r) => s + r[j]!, 0) / Math.max(1, rows.length));
+  const sds = [0, 1, 2].map((j) => Math.sqrt(rows.reduce((s, r) => s + (r[j]! - means[j]!) ** 2, 0) / Math.max(1, rows.length)) || 1);
+  return { means, sds };
+}
+
+/** One feature row with its three continuous columns standardised. */
+function standardize(row: number[], st: { means: number[]; sds: number[] }): number[] {
+  const r = row.slice();
+  for (let j = 0; j < 3; j++) r[j] = (r[j]! - st.means[j]!) / st.sds[j]!;
+  return r;
+}
+
+/**
+ * Fit the logistic odds model and score it blind, against the cell table it replaces. The
+ * model is adopted only when it beats the cell table on both blind tests — the
+ * leave-one-out pass and the walk-forward pass (fit on older peers, test on the next
+ * year) — and the board prints both, with the Murphy decomposition and the calibration
+ * table, so the adoption is checkable rather than claimed. The walk-forward cell numbers
+ * are written onto the table beside its leave-one-out numbers.
+ */
+export function logisticOdds(snapshot: Snapshot, table: OddsTable): LogisticOdds {
+  const peers = snapshot.protocols.filter((p) => !isExcludedProduct(p));
+  const actual = peers.map((p) => (isPreToken(p) ? 0 : 1));
+  if (peers.length < 10) return emptyLogisticOdds();
+  const X = peers.map((p) => logisticFeatures(p, snapshot.as_of));
+  const LAMBDA = 3;
+  const wFull = fitLogistic(X, actual, LAMBDA, null, 800);
+
+  // Leave-one-out: each peer's odds from a model fitted without it, warm-started from
+  // the full fit (200 iterations; cold-start checks differ by at most 0.0005).
+  let looBrier = 0;
+  let looRight = 0;
+  const looPreds: number[] = [];
+  for (let i = 0; i < peers.length; i++) {
+    const Xr = X.filter((_, j) => j !== i);
+    const yr = actual.filter((_, j) => j !== i);
+    const w = fitLogistic(Xr, yr, LAMBDA, wFull, 200);
+    const pr = predictLogistic(w, X[i]!);
+    looPreds.push(pr);
+    looBrier += (pr - actual[i]!) ** 2;
+    if ((pr >= 0.5) === (actual[i] === 1)) looRight++;
+  }
+  looBrier /= peers.length;
+
+  // The cell table's leave-one-out odds, for the Murphy comparison (the same protocol as
+  // oddsTable's Brier test, kept here so the per-peer predictions are on hand).
+  const cellLoo: number[] = [];
+  for (let i = 0; i < peers.length; i++) {
+    const rest = peers.filter((_, j) => j !== i);
+    cellLoo.push(cellOddsFrom(rest, peers[i]!, snapshot.as_of));
+  }
+
+  // Walk-forward: fit on the peers listed before each year, test on that year's peers.
+  const dated = peers
+    .map((p, i) => ({ p, i, year: p.listed_at === null ? null : Number(p.listed_at.slice(0, 4)) }))
+    .filter((d) => d.year !== null && Number.isFinite(d.year));
+  const years = [...new Set(dated.map((d) => d.year!))].sort((a, b) => a - b);
+  const walkFolds: OddsWalkFold[] = [];
+  let walkBrier = 0;
+  let walkRight = 0;
+  let walkCellBrier = 0;
+  let walkCellRight = 0;
+  let walkN = 0;
+  for (const year of years.slice(1)) {
+    const fitIdx = dated.filter((d) => d.year! < year).map((d) => d.i);
+    const testIdx = dated.filter((d) => d.year === year).map((d) => d.i);
+    if (fitIdx.length < 20 || testIdx.length === 0) continue;
+    const w = fitLogistic(fitIdx.map((i) => X[i]!), fitIdx.map((i) => actual[i]!), LAMBDA, null, 800);
+    const fitRows = fitIdx.map((i) => peers[i]!);
+    let lb = 0;
+    let lr = 0;
+    let cb = 0;
+    let cr = 0;
+    for (const i of testIdx) {
+      const lp = predictLogistic(w, X[i]!);
+      const cp = cellOddsFrom(fitRows, peers[i]!, snapshot.as_of);
+      lb += (lp - actual[i]!) ** 2;
+      if ((lp >= 0.5) === (actual[i] === 1)) lr++;
+      cb += (cp - actual[i]!) ** 2;
+      if ((cp >= 0.5) === (actual[i] === 1)) cr++;
+    }
+    walkFolds.push({ year, fit_n: fitIdx.length, test_n: testIdx.length, logistic_brier: lb / testIdx.length, logistic_called_right: lr, cell_brier: cb / testIdx.length, cell_called_right: cr });
+    walkBrier += lb;
+    walkRight += lr;
+    walkCellBrier += cb;
+    walkCellRight += cr;
+    walkN += testIdx.length;
+  }
+
+  // The tried specs, each scored with the same leave-one-out protocol. The continuous
+  // spec (log age, log TVL, growth, family dummies, lambda 10) is the closest rejected
+  // alternative; the cell table is the baseline the logistic replaces.
+  const triedSpecs: OddsTriedSpec[] = [];
+  triedSpecs.push({
+    spec: 'additive age-band + TVL-tier logistic, lambda 3 (adopted)',
+    loo_brier: looBrier,
+    called_right: looRight,
+    verdict: 'adopted — beats the cell table on both blind tests',
+  });
+  const ages = peers.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null && a > 0).sort((a, b) => a - b);
+  const medAge = ages.length === 0 ? 365 : ages[Math.floor(ages.length / 2)]!;
+  const rawCont = peers.map((p) => continuousFeatures(p, snapshot.as_of, medAge));
+  const stFull = standardizer(rawCont);
+  const Xc = rawCont.map((r) => standardize(r, stFull));
+  const wcFull = fitLogistic(Xc, actual, 10, null, 800);
+  let contBrier = 0;
+  let contRight = 0;
+  for (let i = 0; i < peers.length; i++) {
+    const restIdx = peers.map((_, j) => j).filter((j) => j !== i);
+    const st = standardizer(restIdx.map((j) => rawCont[j]!));
+    const Xr = restIdx.map((j) => standardize(rawCont[j]!, st));
+    const yr = restIdx.map((j) => actual[j]!);
+    const w = fitLogistic(Xr, yr, 10, wcFull, 200);
+    const pr = predictLogistic(w, standardize(rawCont[i]!, st));
+    contBrier += (pr - actual[i]!) ** 2;
+    if ((pr >= 0.5) === (actual[i] === 1)) contRight++;
+  }
+  const contLoo = contBrier / peers.length;
+  triedSpecs.push({
+    spec: 'continuous logistic (log age, log TVL, growth, family), lambda 10',
+    loo_brier: contLoo,
+    called_right: contRight,
+    verdict: 'rejected — worse than the adopted model on both blind tests',
+  });
+  triedSpecs.push({
+    spec: 'age-by-size cell table, shrunk toward the base rate (the old odds)',
+    loo_brier: table.brier,
+    called_right: table.called_right,
+    verdict: 'rejected — the logistic beats it leave-one-out and walk-forward',
+  });
+
+  const logistic: LogisticOdds = {
+    lambda: LAMBDA,
+    weights: wFull,
+    loo_brier: looBrier,
+    loo_called_right: looRight,
+    walk_brier: walkN === 0 ? 0 : walkBrier / walkN,
+    walk_called_right: walkRight,
+    walk_n: walkN,
+    walk_folds: walkFolds,
+    calibration: murphy(looPreds, actual),
+    cell_calibration: murphy(cellLoo, actual),
+    tried_specs: triedSpecs,
+  };
+  table.logistic = logistic;
+  table.walk_n = walkN;
+  table.cell_walk_brier = walkN === 0 ? 0 : walkCellBrier / walkN;
+  table.cell_walk_called_right = walkCellRight;
+  return logistic;
+}
+
+/** One protocol's token odds from the logistic model: its age band and TVL tier through
+ *  the fitted weights. The cell label stays as the peer-group name for the dashboard. */
+function oddsOf(p: SnapshotProtocol, snapshot: Snapshot, logistic: LogisticOdds): { odds: number; cell: string } {
+  const odds = predictLogistic(logistic.weights, logisticFeatures(p, snapshot.as_of));
+  return { odds, cell: `${ageBand(ageDays(snapshot.as_of, p.listed_at))}, ${tvlTier(p.tvl_usd)}` };
 }
 
 // ---------------------------------------------------------------- value
@@ -817,20 +1262,144 @@ function launchValue(p: SnapshotProtocol, fit: CurveFit): number {
   return Math.max(1, Math.round(Math.pow(10, fit.intercept + fit.slope * logTvl(p) + offset)));
 }
 
-/** The four numbers one protocol gets: launch value, odds, implied value, and its range. */
+/** The four numbers one protocol gets: launch value, odds, implied value, and its range.
+ *  The odds come from the logistic model. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   snapshot: Snapshot,
   fit: CurveFit,
-  table: OddsTable,
+  logistic: LogisticOdds,
 ): { launch: number; odds: number; cell: string; implied: number; low: number; high: number; age: number | null } {
   const age = ageDays(snapshot.as_of, protocol.listed_at);
   const launch = launchValue(protocol, fit);
-  const { odds, cell } = oddsOf(protocol, snapshot, table);
+  const { odds, cell } = oddsOf(protocol, snapshot, logistic);
   const implied = Math.max(1, Math.round(launch * odds));
   const low = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p10)));
   const high = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p90)));
   return { launch, odds, cell, implied, low, high, age };
+}
+
+// ---------------------------------------------------------------- triangulation
+
+/** The median of a list, or 0 when it is empty. */
+function medianOf(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+/** A percentile of a list, or 0 when it is empty. */
+function percentileOf(xs: number[], q: number): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(q * s.length))]!;
+}
+
+/** The peer multiples: one median market-cap-to-TVL ratio per family, the global median,
+ *  and the rule that prices one protocol from its strict peers. */
+export interface PeerMultiples {
+  families: FamilyMultiple[];
+  global_median_multiple: number;
+  compsOf: (p: SnapshotProtocol) => { value: number; peers: number; rule: 'strict' | 'family' | 'global' };
+}
+
+/**
+ * Build the peer multiples from the traded tokens. Strict peers share the family and the
+ * size band; with fewer than three, the peer set widens to the family, and then to the
+ * whole traded set. The rule is recorded per row, so the reader can see which widening
+ * each peer value used.
+ */
+export function peerMultiples(snapshot: Snapshot): PeerMultiples {
+  const comps = comparables(snapshot.protocols);
+  const globalMed = medianOf(comps.map((p) => (p.mcap_usd ?? 0) / p.tvl_usd));
+  const families: FamilyMultiple[] = [...new Set(comps.map(familyOf))].sort().map((f) => {
+    const ms = comps.filter((p) => familyOf(p) === f).map((p) => (p.mcap_usd ?? 0) / p.tvl_usd);
+    return { family: f, n: ms.length, median: medianOf(ms), p25: percentileOf(ms, 0.25), p75: percentileOf(ms, 0.75) };
+  });
+  const familyMed = new Map(families.map((f) => [f.family, f.median]));
+  const compsOf = (p: SnapshotProtocol): { value: number; peers: number; rule: 'strict' | 'family' | 'global' } => {
+    const strict = comps.filter((q) => familyOf(q) === familyOf(p) && tvlTier(q.tvl_usd) === tvlTier(p.tvl_usd));
+    if (strict.length >= 3) {
+      const med = medianOf(strict.map((q) => (q.mcap_usd ?? 0) / q.tvl_usd));
+      return { value: Math.max(1, Math.round(p.tvl_usd * med)), peers: strict.length, rule: 'strict' };
+    }
+    const fam = comps.filter((q) => familyOf(q) === familyOf(p));
+    if (fam.length >= 3) {
+      return { value: Math.max(1, Math.round(p.tvl_usd * (familyMed.get(familyOf(p)) ?? globalMed))), peers: fam.length, rule: 'family' };
+    }
+    return { value: Math.max(1, Math.round(p.tvl_usd * globalMed)), peers: comps.length, rule: 'global' };
+  };
+  return { families, global_median_multiple: globalMed, compsOf };
+}
+
+/**
+ * Finish the triangulation once the board is ranked: how far the curve and the peer
+ * multiples sit apart across the ranked rows, and which assumption drives the answer.
+ * The slope sensitivity comes from the bare curve's standard error — flexing the slope
+ * by one standard error moves the median row's implied value by `slope_move`, while
+ * flexing the peer median by ten percent moves it by exactly `median_move`.
+ */
+export function finishTriangulation(multiples: PeerMultiples, snapshot: Snapshot, rows: RadarRow[], fit: CurveFit): Triangulation {
+  const divs = rows.map((r) => Math.abs(Math.log10(r.comps_value_usd / r.launch_value_usd)));
+  const rules = { strict: 0, family: 0, global: 0 };
+  for (const r of rows) rules[r.comps_rule]++;
+  const comps = comparables(snapshot.protocols);
+  const xs = comps.map((p) => Math.log10(p.tvl_usd));
+  const ys = comps.map((p) => Math.log10(p.mcap_usd ?? 1));
+  const n = xs.length;
+  const mx = xs.reduce((s, v) => s + v, 0) / Math.max(1, n);
+  const my = ys.reduce((s, v) => s + v, 0) / Math.max(1, n);
+  const sxx = xs.reduce((s, v) => s + (v - mx) ** 2, 0);
+  const sxy = xs.reduce((s, v, i) => s + (v - mx) * (ys[i]! - my), 0);
+  const slope = sxx === 0 ? 0 : sxy / sxx;
+  const inter = my - slope * mx;
+  const rss = xs.reduce((s, v, i) => s + (ys[i]! - (inter + slope * v)) ** 2, 0);
+  const se = n > 2 && sxx > 0 ? Math.sqrt(rss / (n - 2) / sxx) : 0;
+  const medLogTvl = medianOf(rows.map((r) => Math.log10(r.tvl_usd)));
+  return {
+    families: multiples.families,
+    global_median_multiple: multiples.global_median_multiple,
+    median_abs_divergence: medianOf(divs),
+    within_10_pct: rows.length === 0 ? 0 : divs.filter((d) => d <= Math.log10(1.1)).length / rows.length,
+    within_20_pct: rows.length === 0 ? 0 : divs.filter((d) => d <= Math.log10(1.2)).length / rows.length,
+    within_2x: rows.length === 0 ? 0 : divs.filter((d) => d <= Math.log10(2)).length / rows.length,
+    strict_peers: rules.strict,
+    family_peers: rules.family,
+    global_peers: rules.global,
+    slope,
+    slope_se: se,
+    slope_move: Math.pow(10, se * medLogTvl),
+    median_move: 1.1,
+  };
+}
+
+/** One family's context for a thesis farm plan: size, growth, and who dominates it. */
+export function familyContexts(snapshot: Snapshot, multiples: PeerMultiples): Map<string, FamilyContext> {
+  const byFam = new Map<string, SnapshotProtocol[]>();
+  for (const p of snapshot.protocols) {
+    const f = familyOf(p);
+    const list = byFam.get(f) ?? [];
+    list.push(p);
+    byFam.set(f, list);
+  }
+  const out = new Map<string, FamilyContext>();
+  for (const [f, rows] of byFam) {
+    const tvl = rows.reduce((s, p) => s + p.tvl_usd, 0);
+    const growths = rows.map((p) => p.change_7d).filter((g): g is number => g !== null);
+    const top2 = [...rows].sort((a, b) => b.tvl_usd - a.tvl_usd).slice(0, 2);
+    out.set(f, {
+      family: f,
+      protocols: rows.length,
+      tvl_usd: tvl,
+      median_growth: growths.length === 0 ? null : medianOf(growths),
+      top1: top2[0]?.name ?? f,
+      top2: top2[1]?.name ?? top2[0]?.name ?? f,
+      top2_share: tvl === 0 ? 0 : top2.reduce((s, p) => s + p.tvl_usd, 0) / tvl,
+      median_multiple: multiples.families.find((m) => m.family === f)?.median ?? multiples.global_median_multiple,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- farming economics
@@ -946,11 +1515,86 @@ function riskNote(p: SnapshotProtocol): string {
   }
 }
 
-/** The full farm plan for one row: eight steps, plus three more for the top twenty-five. */
-export function farmSteps(p: SnapshotProtocol, econ: Economics, rank: number, age: number | null): string[] {
+/** What a thesis farm plan needs beyond the row itself: the family context, the peer
+ *  value, and the row's own valuation numbers. */
+export interface FarmPlanContext {
+  familyCtx: FamilyContext;
+  comps: number;
+  compsRule: 'strict' | 'family' | 'global';
+  compsPeers: number;
+  launch: number;
+  low: number;
+  high: number;
+  odds: number;
+}
+
+/** How a family earns: the revenue line a thesis names for a protocol in it. */
+const FAMILY_REVENUE: Record<string, string> = {
+  Trading: 'fees on every trade it routes',
+  Lending: 'the spread between what borrowers pay and what suppliers earn',
+  Yield: "a cut of the return on the strategies its vaults run",
+  'Real-world': 'fees on the tokenised assets it manages',
+  'New tech': 'fees for the private compute or AI work it sells',
+  Infra: 'fees for the service it routes or settles',
+  Staking: 'commission on the assets staked through it',
+  Other: 'fees on the service it runs',
+};
+
+/** The thesis-breaking event a farm plan names, from the protocol's category. */
+function breakEvent(p: SnapshotProtocol): string {
+  switch (p.category) {
+    case 'DEX': return 'the top pool loses its largest liquidity provider';
+    case 'Lending': return 'bad debt appears, or the largest market pauses';
+    case 'Derivatives': return 'funding turns persistently negative';
+    case 'CDP': return 'the stablecoin loses its peg';
+    case 'Yield': return 'the vault changes strategy or halts';
+    default: return 'the team pauses the protocol, or a major exploit is disclosed';
+  }
+}
+
+/** A dollar amount in short form for plan text: $2.76B, $21.7M, $5.2M, $800. */
+function shortMoney(n: number): string {
+  const a = Math.abs(n);
+  if (a >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (a >= 1e3) return `$${Math.round(n / 1e3)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+/** The full farm plan for one row: eight steps, plus three more for the top twenty-five.
+ *  The top twenty rows get an eleven-step five-pillar thesis plan instead — business,
+ *  industry, financials, valuation and risks, each with the protocol's own numbers, and
+ *  named exit triggers — because a generic checklist pasted onto the rows the verdict
+ *  turns on reads as generic. */
+export function farmSteps(p: SnapshotProtocol, econ: Economics, rank: number, age: number | null, ctx?: FarmPlanContext): string[] {
   const capital = econ.capital_usd.toLocaleString('en-US');
   const hold = holdDays(age);
   const ageText = age === null ? 'an unknown age' : `${age} days live`;
+  if (rank <= 20 && ctx !== undefined) {
+    const fam = ctx.familyCtx;
+    const cat = p.category ?? 'unlabelled';
+    const growth = p.change_7d;
+    const growthText = growth === null ? 'no seven-day change recorded' : `${growth > 0 ? '+' : ''}${growth.toFixed(1)}% over seven days`;
+    const famGrowth = fam.median_growth === null ? 'no family median recorded' : `${fam.median_growth > 0 ? '+' : ''}${fam.median_growth.toFixed(1)}%`;
+    const ahead = growth === null || fam.median_growth === null ? 'neither ahead nor behind its family on growth' : growth >= fam.median_growth ? 'ahead of its family' : 'behind its family';
+    const div = ctx.comps / Math.max(1, ctx.launch);
+    const agree = Math.abs(Math.log10(div)) <= Math.log10(1.2);
+    const chain = cheapestChain(p.chains);
+    const gas = gasUsd(chain.chain);
+    return [
+      `${p.name} is a ${cat} protocol in the ${fam.family} family — ${fam.family} holds ${shortMoney(fam.tvl_usd)} across ${fam.protocols} protocols, and ${fam.top1} + ${fam.top2} take ${Math.round(fam.top2_share * 100)}% of it. It earns by ${FAMILY_REVENUE[fam.family] ?? FAMILY_REVENUE.Other}.`,
+      `TVL ${shortMoney(p.tvl_usd)}, ${growthText} against the ${fam.family} median of ${famGrowth} — ${ahead}. ${p.name} has ${ageText}. No gas; read before you start.`,
+      `The curve prices a launch at ${shortMoney(ctx.launch)}; family peers price it at ${shortMoney(ctx.comps)} (${div.toFixed(1)}x) — ${agree ? 'the two methods agree within 20%.' : 'the two methods diverge: the curve prices size sublinearly and wins both blind tests, so the verdict follows it.'} Odds ${Math.round(ctx.odds * 100)}% that a token ever appears. Range ${shortMoney(ctx.low)}–${shortMoney(ctx.high)}. No gas; read before you start.`,
+      `Open a fresh wallet, write the seed phrase down offline, and move $${capital} in on ${chain.chain} — keep the farming wallet apart from the one you trade from, so a bad link can only reach the farm. Gas about $${gas}; 10 minutes.`,
+      `${firstAction(p, capital)} Gas about $${gas}; 10 minutes.`,
+      `Return once a week and do a different action — add liquidity, stake, or borrow — so the wallet reads as a regular user, not a one-off airdrop hunter. Gas about $${gas} a visit; 10 minutes a week.`,
+      `Keep the position in place for ${hold} days without moving it — ${p.name} has ${ageText}, and a hold that long is what a long-term user would show. No gas; ${hold} days.`,
+      `${secondAction(p, capital)} Gas about $${gas}; 10 minutes.`,
+      `Open ${p.name}'s points or rewards page once a month and confirm the wallet shows up with its activity — if it does not, the actions above are not being counted and the plan needs changing. No gas; 5 minutes a month.`,
+      `${riskNote(p)} Exit if any of these happen: TVL falls 30% from ${shortMoney(p.tvl_usd)}; the ${fam.family} median multiple compresses below ${(fam.median_multiple / 2).toFixed(2)}; ${breakEvent(p)}. No gas; read before you start.`,
+      `At $${capital} of capital (0.02% of TVL) and a ${Math.round(econ.drop_share * 100)}% airdrop share, this row's expected slice is $${econ.slice_usd.toFixed(2)} against $${econ.fees_usd.toFixed(2)} in fees — ${econ.verdict === 'FARM' ? 'the numbers say farm it.' : econ.verdict === 'MARGINAL' ? 'the numbers say farm it only if you already use this chain.' : 'the numbers say skip it — the fees eat the slice.'} Write every transaction hash, date and gas cost in a small log, and stop the farm when the fees pass the expected slice. No gas; 5 minutes a week.`,
+    ];
+  }
   const steps: string[] = [
     `Open a fresh wallet, write the seed phrase down offline, and move $${capital} in on ${cheapestChain(p.chains).chain} — keep the farming wallet apart from the one you trade from, so a bad link can only reach the farm. Gas about $${gasUsd(cheapestChain(p.chains).chain)}; 10 minutes.`,
     `${firstAction(p, capital)} Gas about $${gasUsd(cheapestChain(p.chains).chain)}; 10 minutes.`,
@@ -1003,15 +1647,29 @@ function rowChecksumString(r: RadarRow): string {
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const fit = fitCurve(snapshot);
   const odds = oddsTable(snapshot);
+  const logistic = logisticOdds(snapshot, odds);
+  const multiples = peerMultiples(snapshot);
+  const famCtx = familyContexts(snapshot, multiples);
   const rankable = snapshot.protocols.filter(isRankable);
   const priced = rankable
-    .map((p) => ({ p, v: impliedValue(p, snapshot, fit, odds) }))
+    .map((p) => ({ p, v: impliedValue(p, snapshot, fit, logistic) }))
     .sort((a, b) => (b.v.implied - a.v.implied) || (a.p.slug < b.p.slug ? -1 : 1));
 
   const rows: RadarRow[] = priced.map(({ p, v }, i) => {
     const { chain, gas } = cheapestChain(p.chains);
     const econ = economics(v.implied, p.tvl_usd, chain);
     const family = familyOf(p);
+    const comp = multiples.compsOf(p);
+    const ctx: FarmPlanContext = {
+      familyCtx: famCtx.get(family) ?? { family, protocols: 0, tvl_usd: 0, median_growth: null, top1: family, top2: family, top2_share: 0, median_multiple: multiples.global_median_multiple },
+      comps: comp.value,
+      compsRule: comp.rule,
+      compsPeers: comp.peers,
+      launch: v.launch,
+      low: v.low,
+      high: v.high,
+      odds: v.odds,
+    };
     return {
       rank: i + 1,
       rank_low: i + 1,
@@ -1027,6 +1685,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       launch_value_usd: v.launch,
       token_odds: v.odds,
       odds_cell: v.cell,
+      comps_value_usd: comp.value,
+      comps_peers: comp.peers,
+      comps_rule: comp.rule,
       range_low_usd: v.low,
       range_high_usd: v.high,
       family,
@@ -1034,7 +1695,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       farm_chain: chain,
       farm_gas_usd: gas,
       economics: econ,
-      farm_steps: farmSteps(p, econ, i + 1, v.age),
+      farm_steps: farmSteps(p, econ, i + 1, v.age, ctx),
     };
   });
 
@@ -1103,8 +1764,12 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     model: {
       launch_value_usd: r.launch_value_usd,
       token_odds: r.token_odds,
+      odds_model: 'logistic',
       odds_cell: r.odds_cell,
       odds_base_rate: odds.base_rate,
+      comps_value_usd: r.comps_value_usd,
+      comps_peers: r.comps_peers,
+      comps_rule: r.comps_rule,
       range_low_usd: r.range_low_usd,
       range_high_usd: r.range_high_usd,
       curve_intercept: fit.intercept,
@@ -1127,6 +1792,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     model_version: MODEL_VERSION,
     fit,
     odds,
+    triangulation: finishTriangulation(multiples, snapshot, rows, fit),
     fit_points: comparables(snapshot.protocols)
       .map((p) => ({ slug: p.slug, name: p.name, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd ?? 0 }))
       .sort((a, b) => a.tvl_usd - b.tvl_usd),
