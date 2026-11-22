@@ -1,14 +1,14 @@
 // Token Radar's program (Node 22, standard library only).
 //
-// It reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// rankable pre-token protocol with the model in lib/model.ts, writes the ranked board to
-// /output/board.json, writes the dashboard's data beside the page, and copies this repository's
-// dashboard/ and screenshots/ to /output. Last, it writes /output/dossier.json, the summary the
-// judge reads, with the vendored make.fun library.
+// It reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), ranks every
+// rankable pre-token protocol with the fitted model in lib/model.ts, writes the ranked board
+// to /output/board.json, writes the dashboard's data beside the page, and copies this
+// repository's dashboard/ and screenshots/ to /output. Last, it writes /output/dossier.json,
+// the summary the judge reads, with the vendored make.fun library.
 //
-// The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
-// and dashboard/app.js read /output/data.js, which this program writes from the same board, so the
-// page and the board can never disagree.
+// The dashboard is a static page, no framework and no network: dashboard/index.html,
+// dashboard/app.css and dashboard/app.js read /output/data.js, which this program writes
+// from the same board, so the page and the board can never disagree.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../token-radar-01-kit/input/snapshot.json
@@ -16,7 +16,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, validateSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -42,7 +42,7 @@ if (!existsSync(inputFile)) {
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+const snapshot = validateSnapshot(JSON.parse(readFileSync(inputFile, 'utf8')));
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
@@ -85,7 +85,9 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const farm = board.filter((r) => r.economics.verdict === 'FARM').length;
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.excluded_size} pre-token protocols left out by the exclusion rule)\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.excluded_size} wrapped, staked or bridged products left out)\n` +
+    `token radar: fitted curve on ${radar.fit.comparables} traded tokens, leave-one-out miss x${radar.fit.loo_median_miss.toFixed(2)} against x${radar.fit.flat_loo_median_miss.toFixed(2)} flat; ${farm} FARM verdicts at the $5,000 ticket\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
