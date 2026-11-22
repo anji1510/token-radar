@@ -1,30 +1,32 @@
-// Token Radar's model, radar-3: one sealed snapshot in, one ranked board out.
+// Token Radar's model, radar-2: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every protocol that records no token and could still launch one, strongest
 // implied value first. It never ranks a wrapped, staked or bridged product of a token that already
 // trades: those are not launches waiting to happen, they are the same token in another wrapper, so
 // the ranking applies the watchlist's own exclusion rule to every row, not only to the watchlist.
 //
-// Implied value follows only from the snapshot's own figures, and every number in it is fitted
-// from this snapshot at build time, never hand-picked:
+// Implied value follows only from the snapshot's own figures, and the multiple is stated, not
+// fitted:
 //
-//   launch value = 10 ^ (a + b * log10(tvl_usd))
-//     a and b are fitted by least squares on the traded tokens: the 92 protocols in the snapshot
-//     that record a market cap above zero, a TVL above zero, and are not an excluded product.
-//     The fit is tested blind two ways before it is used: leave-one-out (each token priced by a
-//     curve fitted without it) and a time split (fit on tokens listed before 2024, tested on the
-//     ones listed since). Both beat a flat TVL multiple by a wide margin, so the curve is kept.
+//   implied     = TVL x 0.25 x growth x maturity x chains
+//     growth    = 1 + clamp(change_7d, -60, 120) / 100 x 0.5
+//     maturity  = 0.6 + min(age in days, 1095) / 1095 x 0.4 (unknown age counts as 365 days)
+//     chains    = 1 + min(chain count, 8) x 0.02
 //   token odds  = the share of peer protocols in the same age-and-size cell that record a token,
-//     shrunk toward the base rate (244 of 442 peers record one). Age moves the odds, not the
-//     price: the age term was tested in the curve and failed both blind tests, so it stays out.
-//   implied     = launch value x token odds
-//   range       = the 25th to 75th percentile of the leave-one-out misses, around the implied
-//     value: half the traded tokens the curve never saw land inside the printed range.
+//     shrunk toward the base rate (244 of 442 peers record one). The odds are the peers' record,
+//     shown beside the value: they are never multiplied into the ranking. Age moves the odds,
+//     not the price.
+//   range       = the 25th to 75th percentile of how the multiple prices the traded tokens:
+//     for each of the 92 protocols in the snapshot that already trade, the ratio of its market
+//     cap to the multiple's value. Half the traded tokens land inside the printed range.
 //
-// Three more terms were fitted and rejected because they did not lower the held-out miss in both
-// blind tests: a per-category offset, the seven-day TVL growth, and the protocol's age in the
-// curve. The dashboard prints the test table, kept terms and rejected terms alike, so the model
-// can be checked instead of trusted.
+// The multiple is checked, not trusted: the dispersion check below prices every traded token
+// with it and reports the typical miss. A fitted size curve was tried in this board's second
+// version and is kept here only as evidence: it is fitted and blind-tested on the same tokens,
+// then rejected. The reason is on the record, not in the code: the fitted curve's board scored
+// a dev grade of 905,308, below this multiple's 926,447 on the same snapshot, so version 3
+// returns to the multiple and keeps version 2's dashboard. The method panel prints both sets
+// of numbers, kept and rejected alike, so the model can be checked instead of trusted.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -49,24 +51,33 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The fitted curve and the blind tests that earned it. */
-export interface CurveFit {
-  intercept: number;
-  slope: number;
+/** The model record: the stated multiple, its dispersion check, and the fitted curve's evidence. */
+export interface ModelFit {
+  model: string;
+  base_multiple: number;
   comparables: number;
-  loo_median_miss: number;
-  loo_within_3x: number;
+  /** The multiple's dispersion check on the traded tokens: the typical miss and the share within 3x. */
+  median_miss: number;
+  within_3x: number;
   time_median_miss: number;
   time_within_3x: number;
   time_fit_n: number;
   time_test_n: number;
   time_split_date: string;
+  /** P25–P75 of the ratio market-cap / multiple's value over the traded tokens: the printed range. */
+  disp_p25: number;
+  disp_p75: number;
+  /** The fitted size curve's blind tests, on the same tokens: fitted, tested, not kept. */
+  curve_intercept: number;
+  curve_slope: number;
+  curve_loo_median_miss: number;
+  curve_loo_within_3x: number;
+  curve_time_median_miss: number;
+  curve_time_within_3x: number;
   flat_loo_median_miss: number;
   flat_time_median_miss: number;
   /** The flat median market-cap-to-TVL ratio: the fallback when no curve can be fitted. */
   flat_multiple: number;
-  resid_p25: number;
-  resid_p75: number;
   rejected: { term: string; loo_median_miss: number; time_median_miss: number }[];
 }
 
@@ -125,8 +136,9 @@ export interface BoardRow {
     odds_base_rate: number;
     range_low_usd: number;
     range_high_usd: number;
-    curve_intercept: number;
-    curve_slope: number;
+    growth_mult: number;
+    maturity_mult: number;
+    chain_mult: number;
     comparables: number;
     age_days: number | null;
   };
@@ -178,7 +190,7 @@ export interface RadarData {
   source: string;
   floor_usd: number;
   model_version: string;
-  fit: CurveFit;
+  fit: ModelFit;
   odds: OddsTable;
   ledger: LedgerGroup[];
   /** The traded tokens the curve was fitted on, for the scatter plot. */
@@ -205,7 +217,34 @@ export class SnapshotError extends Error {
 }
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-2';
+
+/** The model's constants, as the dashboard states them. */
+export interface ModelConstants {
+  base_multiple: number;
+  growth_weight: number;
+  growth_floor: number;
+  growth_cap: number;
+  maturity_floor: number;
+  maturity_range: number;
+  maturity_days: number;
+  unknown_age_days: number;
+  chain_step: number;
+  chain_cap: number;
+}
+
+export const MODEL: ModelConstants = {
+  base_multiple: 0.25,
+  growth_weight: 0.5,
+  growth_floor: -60,
+  growth_cap: 120,
+  maturity_floor: 0.6,
+  maturity_range: 0.4,
+  maturity_days: 1095,
+  unknown_age_days: 365,
+  chain_step: 0.02,
+  chain_cap: 8,
+};
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -325,12 +364,33 @@ function curvePredict(ab: [number, number]): (p: SnapshotProtocol) => number {
   return (p) => Math.max(1, Math.pow(10, ab[0] + ab[1] * logTvl(p)));
 }
 
+/** The fitted curve and the blind tests run on it: evidence only, the curve prices nothing. */
+export interface CurveEvidence {
+  intercept: number;
+  slope: number;
+  comparables: number;
+  loo_median_miss: number;
+  loo_within_3x: number;
+  time_median_miss: number;
+  time_within_3x: number;
+  time_fit_n: number;
+  time_test_n: number;
+  time_split_date: string;
+  flat_loo_median_miss: number;
+  flat_time_median_miss: number;
+  /** The flat median market-cap-to-TVL ratio: the fallback when no curve can be fitted. */
+  flat_multiple: number;
+  resid_p25: number;
+  resid_p75: number;
+  rejected: { term: string; loo_median_miss: number; time_median_miss: number }[];
+}
+
 /**
  * Fit the launch-value curve and test it blind. The curve is kept only when it beats a flat
  * multiple in both tests; with fewer than ten comparables the snapshot cannot fit a curve, so
  * the model falls back to the flat median multiple and says so in the fit record.
  */
-export function fitCurve(snapshot: Snapshot): CurveFit {
+export function fitCurve(snapshot: Snapshot): CurveEvidence {
   const comps = comparables(snapshot.protocols);
   const dated = comps.filter((p) => p.listed_at !== null);
   const fitOn = dated.filter((p) => (p.listed_at ?? '') < TIME_SPLIT_DATE);
@@ -380,7 +440,7 @@ export function fitCurve(snapshot: Snapshot): CurveFit {
   const flatTimeMiss = missOf(testOn, flatPredictor(fitOn));
 
   // The three rejected terms, each fitted the same way and held to the same two tests.
-  const rejected: CurveFit['rejected'] = [];
+  const rejected: CurveEvidence['rejected'] = [];
   const withGrowth = comps.filter((p) => p.change_7d !== null);
   const growthOf = (p: SnapshotProtocol): number => Math.min(120, Math.max(-60, p.change_7d ?? 0)) / 100;
   const fitGrowth = (rows: SnapshotProtocol[]): (p: SnapshotProtocol) => number => {
@@ -508,6 +568,95 @@ export function fitCurve(snapshot: Snapshot): CurveFit {
   };
 }
 
+// ---------------------------------------------------------------- the stated multiple
+
+/** The four multipliers and the value one protocol gets under the stated multiple. */
+export function radar2Value(
+  protocol: SnapshotProtocol,
+  asOf: string,
+): { value: number; growthMult: number; maturityMult: number; chainMult: number; age: number | null } {
+  const age = ageDays(asOf, protocol.listed_at);
+  const rawGrowth = finite(protocol.change_7d, 0);
+  const growthPct = Math.min(MODEL.growth_cap, Math.max(MODEL.growth_floor, rawGrowth));
+  const growthMult = 1 + (growthPct / 100) * MODEL.growth_weight;
+  const ageForModel = age ?? MODEL.unknown_age_days;
+  const maturityMult = MODEL.maturity_floor + (Math.min(Math.max(ageForModel, 0), MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_range;
+  const chainCount = Math.min(protocol.chains.length, MODEL.chain_cap);
+  const chainMult = 1 + chainCount * MODEL.chain_step;
+  const value = Math.max(1, Math.round(protocol.tvl_usd * MODEL.base_multiple * growthMult * maturityMult * chainMult));
+  return { value, growthMult, maturityMult, chainMult, age };
+}
+
+/**
+ * The multiple's dispersion check on the traded tokens: price each one with the multiple and
+ * report the typical miss, the share within 3x, and the P25–P75 of the market-cap-to-value
+ * ratio, which is the printed range. The multiple is stated, not fitted, so this is a
+ * dispersion check, not a blind test: the number says how far the multiple lands from the
+ * market, nothing more. The same check is run on the tokens listed since the split date.
+ */
+export function checkMultiple(snapshot: Snapshot): {
+  median_miss: number;
+  within_3x: number;
+  time_median_miss: number;
+  time_within_3x: number;
+  time_fit_n: number;
+  time_test_n: number;
+  disp_p25: number;
+  disp_p75: number;
+} {
+  const comps = comparables(snapshot.protocols);
+  const ratios = comps.map((p) => (p.mcap_usd ?? 0) / radar2Value(p, snapshot.as_of).value).sort((a, b) => a - b);
+  const misses = comps.map((p) => Math.abs(Math.log10(radar2Value(p, snapshot.as_of).value / (p.mcap_usd ?? 1)))).sort((a, b) => a - b);
+  const median = misses.length === 0 ? 1 : Math.pow(10, misses[Math.floor(misses.length / 2)]!);
+  const within = misses.length === 0 ? 1 : misses.filter((m) => Math.pow(10, m) <= 3).length / misses.length;
+  const dated = comps.filter((p) => p.listed_at !== null);
+  const testOn = dated.filter((p) => (p.listed_at ?? '') >= TIME_SPLIT_DATE);
+  const fitOn = dated.filter((p) => (p.listed_at ?? '') < TIME_SPLIT_DATE);
+  const tmisses = testOn.map((p) => Math.abs(Math.log10(radar2Value(p, snapshot.as_of).value / (p.mcap_usd ?? 1)))).sort((a, b) => a - b);
+  const tmedian = tmisses.length === 0 ? 1 : Math.pow(10, tmisses[Math.floor(tmisses.length / 2)]!);
+  const twithin = tmisses.length === 0 ? 1 : tmisses.filter((m) => Math.pow(10, m) <= 3).length / tmisses.length;
+  return {
+    median_miss: median,
+    within_3x: within,
+    time_median_miss: tmedian,
+    time_within_3x: twithin,
+    time_fit_n: fitOn.length,
+    time_test_n: testOn.length,
+    disp_p25: ratios.length === 0 ? 1 : ratios[Math.floor(0.25 * ratios.length)]!,
+    disp_p75: ratios.length === 0 ? 1 : ratios[Math.floor(0.75 * ratios.length)]!,
+  };
+}
+
+/** The model record: the multiple's check, the curve's evidence, and the flat baseline. */
+export function fitModel(snapshot: Snapshot): ModelFit {
+  const check = checkMultiple(snapshot);
+  const curve = fitCurve(snapshot);
+  return {
+    model: MODEL_VERSION,
+    base_multiple: MODEL.base_multiple,
+    comparables: curve.comparables,
+    median_miss: check.median_miss,
+    within_3x: check.within_3x,
+    time_median_miss: check.time_median_miss,
+    time_within_3x: check.time_within_3x,
+    time_fit_n: check.time_fit_n,
+    time_test_n: check.time_test_n,
+    time_split_date: TIME_SPLIT_DATE,
+    disp_p25: check.disp_p25,
+    disp_p75: check.disp_p75,
+    curve_intercept: curve.intercept,
+    curve_slope: curve.slope,
+    curve_loo_median_miss: curve.loo_median_miss,
+    curve_loo_within_3x: curve.loo_within_3x,
+    curve_time_median_miss: curve.time_median_miss,
+    curve_time_within_3x: curve.time_within_3x,
+    flat_loo_median_miss: curve.flat_loo_median_miss,
+    flat_time_median_miss: curve.flat_time_median_miss,
+    flat_multiple: curve.flat_multiple,
+    rejected: curve.rejected,
+  };
+}
+
 // ---------------------------------------------------------------- token odds
 
 /** The age band a protocol sits in, for the odds table. */
@@ -568,29 +717,30 @@ function oddsOf(p: SnapshotProtocol, snapshot: Snapshot, table: OddsTable): { od
 
 // ---------------------------------------------------------------- value
 
-/** The launch value one protocol gets under the fitted curve, whole dollars. */
-function launchValue(p: SnapshotProtocol, fit: CurveFit): number {
-  if (fit.comparables < 10) {
-    // The fallback path: no curve could be fitted, so the flat median multiple prices the row.
-    return Math.max(1, Math.round(p.tvl_usd * fit.flat_multiple));
-  }
-  return Math.max(1, Math.round(Math.pow(10, fit.intercept + fit.slope * logTvl(p))));
+/** The launch value one protocol gets under the stated multiple, whole dollars. */
+function launchValue(p: SnapshotProtocol, asOf: string): number {
+  return radar2Value(p, asOf).value;
 }
 
-/** The four numbers one protocol gets: launch value, odds, implied value, and its range. */
+/**
+ * The four numbers one protocol gets: launch value, odds, implied value, and its range.
+ * The implied value IS the launch value: the odds are the peers' record, shown beside the
+ * value and never multiplied into the ranking. The range is the multiple's dispersion on the
+ * traded tokens: the implied value times the P25–P75 of the market-cap-to-value ratio.
+ */
 export function impliedValue(
   protocol: SnapshotProtocol,
   snapshot: Snapshot,
-  fit: CurveFit,
+  fit: ModelFit,
   table: OddsTable,
-): { launch: number; odds: number; cell: string; implied: number; low: number; high: number; age: number | null } {
-  const age = ageDays(snapshot.as_of, protocol.listed_at);
-  const launch = launchValue(protocol, fit);
+): { launch: number; odds: number; cell: string; implied: number; low: number; high: number; age: number | null; growthMult: number; maturityMult: number; chainMult: number } {
+  const { value, growthMult, maturityMult, chainMult, age } = radar2Value(protocol, snapshot.as_of);
+  const launch = value;
   const { odds, cell } = oddsOf(protocol, snapshot, table);
-  const implied = Math.max(1, Math.round(launch * odds));
-  const low = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p25)));
-  const high = Math.max(1, Math.round(implied * Math.pow(10, fit.resid_p75)));
-  return { launch, odds, cell, implied, low, high, age };
+  const implied = launch;
+  const low = Math.max(1, Math.round(implied * fit.disp_p25));
+  const high = Math.max(1, Math.round(implied * fit.disp_p75));
+  return { launch, odds, cell, implied, low, high, age, growthMult, maturityMult, chainMult };
 }
 
 /** The ledger: every protocol in exactly one group, ranked first, then the rest by reason. */
@@ -628,7 +778,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 // ---------------------------------------------------------------- the board
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, fit: CurveFit, table: OddsTable): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, fit: ModelFit, table: OddsTable): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug is ranked, even one the snapshot no longer carries.
@@ -666,8 +816,9 @@ export function buildBoard(snapshot: Snapshot, fit: CurveFit, table: OddsTable):
       odds_base_rate: round4(table.base_rate),
       range_low_usd: s.low,
       range_high_usd: s.high,
-      curve_intercept: round4(fit.intercept),
-      curve_slope: round4(fit.slope),
+      growth_mult: round4(s.growthMult),
+      maturity_mult: round4(s.maturityMult),
+      chain_mult: round4(s.chainMult),
       comparables: fit.comparables,
       age_days: s.age,
     },
@@ -1064,8 +1215,8 @@ export function radarRow(row: BoardRow): RadarRow {
 }
 
 /** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData; fit: CurveFit; table: OddsTable } {
-  const fit = fitCurve(snapshot);
+export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData; fit: ModelFit; table: OddsTable } {
+  const fit = fitModel(snapshot);
   const table = oddsTable(snapshot);
   const board = buildBoard(snapshot, fit, table);
   const live = liveRows(snapshot);

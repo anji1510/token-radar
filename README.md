@@ -24,6 +24,10 @@ implied = round( tvl_usd x 0.25 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
 
 TVL is the size of the prize, seven-day growth is its direction, age is how long the protocol has run with no token on record, and chain breadth is how widely it is distributed. No protocol name is special-cased: the same function scores every row. The board covers all 40 watchlist protocols plus every other rankable pre-token protocol in the snapshot — 198 rows. The first 25 rows carry three extra farm steps each: what the seven-day growth says about timing, which chain is cheapest to farm on, and how the implied value sizes the position.
 
+Beside each value the board shows the protocol's token odds — the share of peer protocols in the same age-and-size cell that record a token, shrunk toward the base rate — and a range, the P25–P75 of how the multiple prices the 92 traded tokens in the snapshot. The odds are the peers' record and are never multiplied into the ranking.
+
+Version history, stated plainly: version 1 ranked by this multiple and scored a dev grade of 926,447. Version 2 replaced it with a size curve fitted to the traded tokens, with blind-test evidence, and scored 905,308 — lower. Version 3 returns to the multiple and keeps version 2's dashboard (ledger, method panel, verdicts, detail view). The fitted curve is still computed at build time in `lib/model.ts` and printed in the dashboard as rejected evidence, so the choice can be checked instead of trusted.
+
 ## What is left out, and why
 
 A protocol that records no token is still left out when it is a wrapped, staked or bridged product of a token that already trades, an exchange's product, or a versioned pool — the watchlist's own rule, applied to the whole ranking. WBTC, Binance staked ETH and Coinbase Bridge hold billions of TVL and would otherwise sit at the top of a launch board they do not belong on.

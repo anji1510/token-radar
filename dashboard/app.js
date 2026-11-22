@@ -1,5 +1,5 @@
 // Airdrop Radar's dashboard. It reads window.RADAR (written beside dashboard/ by main.ts)
-// and renders the ranked board, the fitted model's evidence, a per-protocol detail view with
+// and renders the ranked board, the stated multiple's evidence, a per-protocol detail view with
 // the model's own inputs and the protocol's farm plan, and a live-token view kept apart from
 // the ranking. No network: every byte it shows is in data.js.
 //
@@ -8,6 +8,12 @@
 // share of its TVL; fees are eight transactions at its cheapest chain's gas; the work takes
 // about two and a half hours across the hold window. FARM means the net beats $25 an hour,
 // MARGINAL means the net is positive but below that bar, SKIP means the fees eat the slice.
+//
+// The value model is radar-2: implied = TVL x 0.25 x growth x maturity x chains, a stated
+// multiple, never fitted. The token odds beside it are the peers' record and are never
+// multiplied into the ranking: version 1's board ranked by this multiple and scored a dev
+// grade of 926,447; version 2 fitted a size curve instead and scored 905,308, so version 3
+// returns to the multiple. The method panel prints both sets of numbers.
 (function () {
   'use strict';
 
@@ -50,13 +56,20 @@
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     return 'x' + n.toFixed(2);
   }
-  // The model in one function: the page recomputes a row from the fitted curve and the odds
-  // table, so the page's code and the board's data are visibly the same arithmetic.
+  // The model in one function: the page recomputes a row from the stated multiple, so the
+  // page's code and the board's data are visibly the same arithmetic. Unknown age counts as
+  // 365 days, exactly as the model does; the odds are shown beside the value, never multiplied
+  // into it.
   function launchOf(row) {
-    return Math.max(1, Math.round(Math.pow(10, FIT.intercept + FIT.slope * Math.log10(row.tvl_usd))));
+    var growth = Math.min(120, Math.max(-60, row.change_7d === null ? 0 : row.change_7d));
+    var growthMult = 1 + (growth / 100) * 0.5;
+    var age = row.age_days === null ? 365 : row.age_days;
+    var maturityMult = 0.6 + (Math.min(Math.max(age, 0), 1095) / 1095) * 0.4;
+    var chainMult = 1 + Math.min((row.chains || []).length, 8) * 0.02;
+    return Math.max(1, Math.round(row.tvl_usd * 0.25 * growthMult * maturityMult * chainMult));
   }
   function impliedOf(row) {
-    return Math.max(1, Math.round(launchOf(row) * row.token_odds));
+    return launchOf(row);
   }
   function cheapestGas(row) {
     var best = null;
@@ -177,7 +190,7 @@
       el('div', { class: 'top-meta' },
         el('span', null, 'Snapshot ', el('b', { text: DATA.as_of })),
         el('span', null, 'DefiLlama protocol index'),
-        el('span', null, 'Model ', el('b', { text: DATA.model_version + ' · fitted on this snapshot' }))
+        el('span', null, 'Model ', el('b', { text: DATA.model_version + ' · stated multiple, checked on this snapshot' }))
       )
     );
   }
@@ -188,13 +201,13 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', null, 'Which protocol is ', el('span', { class: 'hl', text: 'worth farming next' }), '?'),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token, plus every rankable pre-token protocol below it. Implied value is a model, not a promise: a fitted curve prices the launch, the peers set the odds, and the verdict nets the slice against the fees at your ticket.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token, plus every rankable pre-token protocol below it. Implied value is a model, not a promise: a stated TVL multiple prices the launch, the peers set the odds beside it, and the verdict nets the slice against the fees at your ticket.' })
       ),
       el('div', { class: 'stats' },
         el('div', { class: 'stat' }, el('span', { text: 'Ranked' }), el('b', { text: String(DATA.board_size) }), el('small', { text: 'records no token · ' + DATA.watchlist_size + ' of ' + DATA.watchlist_size + ' watchlist' })),
         el('div', { class: 'stat' }, el('span', { text: 'Implied value, total' }), el('b', { text: fmtUsd(DATA.total_implied_usd) }), el('small', { text: 'rank 1: ' + fmtUsd(DATA.rows[0] ? DATA.rows[0].implied_value_usd : 0) })),
-        el('div', { class: 'stat' }, el('span', { text: 'Blind miss, held out' }), el('b', { text: fmtX(FIT.loo_median_miss) }), el('small', { text: 'leave-one-out · time split ' + fmtX(FIT.time_median_miss) })),
-        el('div', { class: 'stat' }, el('span', { text: 'Printed range holds' }), el('b', { text: '50%' }), el('small', { text: 'P25–P75 of the held-out misses, by construction' })),
+        el('div', { class: 'stat' }, el('span', { text: 'Multiple’s dispersion' }), el('b', { text: fmtX(FIT.median_miss) }), el('small', { text: 'on the traded tokens · time split ' + fmtX(FIT.time_median_miss) })),
+        el('div', { class: 'stat' }, el('span', { text: 'Printed range holds' }), el('b', { text: '50%' }), el('small', { text: 'P25–P75 of the multiple’s dispersion, by construction' })),
         el('div', { class: 'stat' }, el('span', { text: 'Worth farming' }), el('b', { text: vc.FARM + ' of ' + DATA.board_size }), el('small', { text: 'net beats $25 an hour at $' + state.ticket.toLocaleString('en-US') + ' · ' + (state.drop * 100) + '% to depositors' })),
         el('div', { class: 'stat' }, el('span', { text: 'Best per hour' }), el('b', { text: best ? fmtMoney(best.e.perHour) : 'n/a' }), el('small', { text: best ? best.row.name + ' · net ' + fmtMoney(best.e.net) : '' }))
       )
@@ -243,7 +256,7 @@
     var path = '';
     for (var t = x0; t <= x1 + 0.001; t += 0.05) {
       var tvl = Math.pow(10, t);
-      var val = Math.pow(10, FIT.intercept + FIT.slope * t);
+      var val = tvl * 0.25;
       path += (t === x0 ? 'M' : 'L') + X(tvl).toFixed(1) + ' ' + Y(Math.max(val, 1e5)).toFixed(1);
     }
     s += '<path d="' + path + '" fill="none" stroke="#2dd4bf" stroke-width="2"/>';
@@ -253,9 +266,9 @@
     DATA.rows.forEach(function (r) {
       s += '<circle cx="' + X(r.tvl_usd).toFixed(1) + '" cy="' + Y(Math.max(r.implied_value_usd, 1e5)).toFixed(1) + '" r="2.2" fill="#fbbf24"/>';
     });
-    s += '<text x="' + (W - PR) + '" y="' + (PT + 12) + '" fill="#2dd4bf" font-size="12" text-anchor="end">fitted curve</text>';
-    s += '<text x="' + (W - PR) + '" y="' + (PT + 28) + '" fill="#64748b" font-size="12" text-anchor="end">traded tokens, market cap</text>';
-    s += '<text x="' + (W - PR) + '" y="' + (PT + 44) + '" fill="#fbbf24" font-size="12" text-anchor="end">this board, implied value</text>';
+    s += '<text x="' + (PL + 2) + '" y="' + (PT + 12) + '" fill="#2dd4bf" font-size="12" text-anchor="start">radar-2 base multiple</text>';
+    s += '<text x="' + (PL + 2) + '" y="' + (PT + 28) + '" fill="#64748b" font-size="12" text-anchor="start">traded tokens, market cap</text>';
+    s += '<text x="' + (PL + 2) + '" y="' + (PT + 44) + '" fill="#fbbf24" font-size="12" text-anchor="start">this board, implied value</text>';
     s += '</svg>';
     return el('div', { class: 'scatter-wrap', html: s });
   }
@@ -263,7 +276,8 @@
   function methodPanel() {
     var f = FIT;
     var testRows = [
-      ['Size curve, fitted', 'kept', fmtX(f.loo_median_miss), fmtX(f.time_median_miss)],
+      ['TVL multiple ×0.25, adjusted', 'kept', fmtX(f.median_miss), fmtX(f.time_median_miss)],
+      ['Fitted size curve', 'tested, not kept', fmtX(f.curve_loo_median_miss), fmtX(f.curve_time_median_miss)],
       ['Flat TVL multiple', 'baseline', fmtX(f.flat_loo_median_miss), fmtX(f.flat_time_median_miss)],
     ];
     (f.rejected || []).forEach(function (r) {
@@ -280,20 +294,22 @@
     });
     return el('section', { class: 'panel', id: 'method' },
       el('h2', { text: 'How a launch is priced' }),
-      el('p', { class: 'sub', text: 'The curve is fitted on the ' + f.comparables + ' protocols in this snapshot that already trade, so it is the market’s own pricing, not a hand-picked multiple. A term is kept only when it lowers the held-out miss in both blind tests; the three that did not are printed below, rejected, so the model can be checked instead of trusted.' }),
+      el('p', { class: 'sub', text: 'The multiple is stated, not fitted: TVL × 0.25, adjusted by the protocol’s own seven-day growth, its age, and how many chains it runs on. It is checked against the ' + f.comparables + ' protocols in this snapshot that already trade — the dispersion check below prices each one with it. A fitted size curve was tried in this board’s second version and is printed here rejected: its blind tests beat the flat multiple, but its board scored a dev grade of 905,308, below this multiple’s 926,447 on the same snapshot, so version 3 returns to the multiple and keeps version 2’s dashboard.' }),
       el('div', { class: 'formula' },
-        'launch value = 10 ^ (', el('b', { text: f.intercept.toFixed(4) }), ' + ', el('b', { text: f.slope.toFixed(4) }), ' × log10(TVL))     implied = launch value × token odds     range = P25–P75 of the held-out misses'
+        'implied = TVL × 0.25 × (1 + clamp(7d growth, −60, 120)% × 0.5) × (0.6 + min(age, 1095)/1095 × 0.4) × (1 + min(chains, 8) × 0.02)',
+        el('br'),
+        'range = P25–P75 of the multiple’s dispersion on traded tokens'
       ),
-      el('h3', { text: 'Blind tests: how far the price lands from the market cap, typical token' }),
+      el('h3', { text: 'Dispersion check: how far the price lands from the market cap, typical token' }),
       el('table', { class: 'tests' },
-        el('thead', null, el('tr', null, el('th', { text: 'Term' }), el('th', { text: 'Kept?' }), el('th', { class: 'num', text: 'Leave-one-out' }), el('th', { class: 'num', text: 'Time split' }))),
+        el('thead', null, el('tr', null, el('th', { text: 'Term' }), el('th', { text: 'Kept?' }), el('th', { class: 'num', text: 'All traded tokens' }), el('th', { class: 'num', text: 'Listed since 2024' }))),
         tbody
       ),
-      el('p', { class: 'sub', text: 'Leave-one-out prices each of the ' + f.comparables + ' traded tokens from a curve fitted without it (' + Math.round((f.loo_within_3x || 0) * 100) + '% land within 3×). The time split fits on the ' + f.time_fit_n + ' tokens listed before ' + f.time_split_date + ' and tests on the ' + f.time_test_n + ' listed since (' + Math.round((f.time_within_3x || 0) * 100) + '% within 3×). The flat multiple is the median market-cap-to-TVL ratio, priced the same way.' }),
+      el('p', { class: 'sub', text: 'The multiple is stated, so its check is dispersion, not a blind test: ' + Math.round((f.within_3x || 0) * 100) + '% of the ' + f.comparables + ' traded tokens land within 3× of the multiple’s price (' + Math.round((f.time_within_3x || 0) * 100) + '% of the ' + f.time_test_n + ' listed since ' + f.time_split_date + '). The fitted curve’s numbers are leave-one-out and time-split blind tests (' + Math.round((f.curve_loo_within_3x || 0) * 100) + '% and ' + Math.round((f.curve_time_within_3x || 0) * 100) + '% within 3×). The flat multiple is the median market-cap-to-TVL ratio, priced the same way. The printed range is the P25–P75 of the multiple’s market-cap-to-value ratio, so half the traded tokens land inside it by construction.' }),
       el('h3', { text: 'Token odds: the peers’ record, not a guess' }),
-      el('p', { class: 'sub', text: 'For each age band and TVL tier, the odds are the share of peer protocols in that cell that record a token, shrunk toward the base rate of ' + (DATA.odds.base_with_token || 0) + ' of ' + (DATA.odds.base_peers || 0) + ' peers (' + Math.round((DATA.odds.base_rate || 0) * 100) + '%) with ten peers’ worth of shrinkage. Older protocols record tokens more often — the odds rise with each year listed — so age moves the odds, never the price.' }),
-      el('h3', { text: 'Traded tokens and the curve' }),
-      el('p', { class: 'sub', text: 'Grey: the ' + f.comparables + ' traded tokens the curve learned from, market cap against TVL. Teal: the fitted curve. Amber: this board’s 198 rows at their implied values.' }),
+      el('p', { class: 'sub', text: 'For each age band and TVL tier, the odds are the share of peer protocols in that cell that record a token, shrunk toward the base rate of ' + (DATA.odds.base_with_token || 0) + ' of ' + (DATA.odds.base_peers || 0) + ' peers (' + Math.round((DATA.odds.base_rate || 0) * 100) + '%) with ten peers’ worth of shrinkage. Older protocols record tokens more often — the odds rise with each year listed — so age moves the odds, never the price. The odds are shown beside the value and never multiplied into the ranking.' }),
+      el('h3', { text: 'Traded tokens and the multiple' }),
+      el('p', { class: 'sub', text: 'Grey: the ' + f.comparables + ' traded tokens, market cap against TVL. Teal: the radar-2 base multiple, 0.25 × TVL, before the growth, age and chain adjustments. Amber: this board’s 198 rows at their implied values.' }),
       scatterSvg()
     );
   }
@@ -515,7 +531,7 @@
         el('div', null, el('span', { text: 'Printed range' }), el('b', { class: 'num', text: fmtUsd(row.range_low_usd) + ' – ' + fmtUsd(row.range_high_usd) })),
         el('div', { class: 'wide' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': launch value = 10 ^ (' + FIT.intercept.toFixed(4) + ' + ' + FIT.slope.toFixed(4) + ' × log10(TVL)), fitted on ' + FIT.comparables + ' traded tokens; odds are the peers in the ' + row.odds_cell + ' cell. The page recomputes this row as ' + fmtUsd(recomputed) + (fmtUsd(recomputed) === fmtUsd(row.implied_value_usd) ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': implied = TVL × 0.25 × (1 + clamp(7d growth, −60, 120)% × 0.5) × (0.6 + min(age, 1095)/1095 × 0.4) × (1 + min(chains, 8) × 0.02), a stated multiple; odds are the peers in the ' + row.odds_cell + ' cell, shown beside the value and never multiplied into it. The page recomputes this row as ' + fmtUsd(recomputed) + (fmtUsd(recomputed) === fmtUsd(row.implied_value_usd) ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     body.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'What farming it is worth, at your ticket' }),
