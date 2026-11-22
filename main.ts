@@ -87,7 +87,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 const farm = board.filter((r) => r.economics.verdict === 'FARM').length;
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.excluded_size} wrapped, staked or bridged products left out)\n` +
-    `token radar: fitted curve on ${radar.fit.comparables} traded tokens, leave-one-out miss x${radar.fit.loo_median_miss.toFixed(2)} against x${radar.fit.flat_loo_median_miss.toFixed(2)} flat; ${farm} FARM verdicts at the $5,000 ticket\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.set_aside.reduce((s, g) => s + g.count, 0)} pre-token products set aside)\n` +
+    `token radar: fitted curve on ${radar.fit.comparables} traded tokens, leave-one-out miss x${radar.fit.loo_median_miss.toFixed(2)} against x${radar.fit.flat_loo_median_miss.toFixed(2)} flat; ${farm} FARM verdicts at capital 0.02% of TVL\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

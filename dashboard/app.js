@@ -5,7 +5,7 @@
 // The table is the product: one row per token, sorted by implied value, with the range, the
 // odds and the costed verdict printed beside the value, so each row is checkable without
 // leaving the table. The economics controls recompute every row's verdict in the page from
-// the same arithmetic the model used, at the ticket and airdrop share the reader picks.
+// the same arithmetic the model used, at the capital share and airdrop share the reader picks.
 (function () {
   'use strict';
 
@@ -26,8 +26,8 @@
     minTvl: Number(params.get('minTvl')) || 0,
     tab: params.get('tab') || 'pre-token',
     verdict: params.get('verdict') || 'all',
-    ticket: Number(params.get('ticket')) || 5000,
-    drop: Number(params.get('drop')) || 10,
+    capPct: Number(params.get('cap')) || 0.02,
+    drop: Number(params.get('drop')) || 7,
     sort: params.get('sort') || 'implied',
     dir: params.get('dir') === 'asc' ? 1 : -1,
   };
@@ -73,14 +73,15 @@
   /** The gas cost of one transaction on a chain, or $1 when the chain is unknown. */
   function gasOf(chain) { return GAS[chain] === undefined ? 1 : GAS[chain]; }
 
-  /** One row's economics at the reader's ticket and airdrop share, same arithmetic as the model. */
+  /** One row's economics at the reader's capital share and airdrop share, same arithmetic as the model. */
   function econOf(row) {
-    var slice = row.tvl_usd > 0 ? (row.implied_value_usd * (state.drop / 100) * state.ticket) / row.tvl_usd : 0;
+    var capital = Math.round(Math.min(50000, Math.max(100, (state.capPct / 100) * row.tvl_usd)));
+    var slice = row.tvl_usd > 0 ? (row.implied_value_usd * (state.drop / 100) * capital) / row.tvl_usd : 0;
     var fees = 8 * gasOf(row.farm_chain);
     var net = slice - fees;
     var perHour = net / 2.5;
     var verdict = net > 0 && perHour >= 25 ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
-    return { slice: slice, fees: fees, net: net, perHour: perHour, verdict: verdict };
+    return { capital: capital, slice: slice, fees: fees, net: net, perHour: perHour, verdict: verdict };
   }
 
   /** The 32-bit FNV-1a checksum of a string, as eight hex digits — the same as main.ts uses. */
@@ -143,7 +144,7 @@
       '<text class="lab" x="' + (px(Math.log10(first.tvl_usd)) + 8).toFixed(1) + '" y="' + (py(Math.log10(first.mcap_usd)) - 10).toFixed(1) + '">' + esc(first.name) + '</text>' +
       '<text class="lab" x="' + (px(Math.log10(last.tvl_usd)) - 8).toFixed(1) + '" y="' + (py(Math.log10(last.mcap_usd)) - 8).toFixed(1) + '" text-anchor="end">' + esc(last.name) + '</text>' +
       '</svg>' +
-      '<p class="cap">Each dot is one traded token, market cap against TVL, both on a log scale. The green line is the fitted curve: market cap = 10^' + a.toFixed(4) + ' x TVL^' + b.toFixed(4) + '.</p></div>';
+      '<p class="cap">Each dot is one traded token, market cap against TVL, both on a log scale. The green line is the base curve — market cap = 10^' + a.toFixed(4) + ' x TVL^' + b.toFixed(4) + ' — and each family shifts it: Trading x1.47, New tech x1.19, Infra x1.08, Real-world x1.07, Staking x0.89, Lending x0.76, Yield x0.73.</p></div>';
   }
 
   function syncUrl() {
@@ -157,8 +158,8 @@
     if (state.minTvl) p.set('minTvl', String(state.minTvl));
     if (state.tab !== 'pre-token') p.set('tab', state.tab);
     if (state.verdict !== 'all') p.set('verdict', state.verdict);
-    if (state.ticket !== 5000) p.set('ticket', String(state.ticket));
-    if (state.drop !== 10) p.set('drop', String(state.drop));
+    if (state.capPct !== 0.02) p.set('cap', String(state.capPct));
+    if (state.drop !== 7) p.set('drop', String(state.drop));
     if (state.sort !== 'implied') p.set('sort', state.sort);
     if (state.dir === 1) p.set('dir', 'asc');
     var next = p.toString();
@@ -208,7 +209,7 @@
     var vclass = e.verdict === 'FARM' ? 'verdict-farm' : e.verdict === 'MARGINAL' ? 'verdict-marginal' : 'verdict-skip';
     var change = r.change_7d === null ? '<span class="faint">n/a</span>' : '<span class="' + (r.change_7d >= 0 ? 'accent' : 'red') + '">' + pct(r.change_7d) + '</span>';
     return '<tr class="' + (WATCH.has(r.slug) ? 'wl' : '') + '">' +
-      '<td class="num">' + r.rank + '</td>' +
+      '<td class="num">' + r.rank + '<span class="rankrange" title="Rank range at the P25–P75 range">' + r.rank_low + '–' + r.rank_high + '</span></td>' +
       '<td class="name"><a href="?view=detail&p=' + encodeURIComponent(r.slug) + '">' + esc(r.name) + '</a>' +
       '<span class="slug">' + esc(r.slug) + (WATCH.has(r.slug) ? ' · watchlist' : '') + '</span>' +
       '<span class="cat">' + esc(r.category || 'Other') + ' · ' + esc(chainsShort(r.chains)) + '</span></td>' +
@@ -232,10 +233,12 @@
     DATA.rows.forEach(function (r) { (r.chains || []).forEach(function (c) { if (chains.indexOf(c) < 0) chains.push(c); }); });
     chains.sort();
     var farmCount = DATA.rows.filter(function (r) { return econOf(r).verdict === 'FARM'; }).length;
+    var verdictCounts = { FARM: 0, MARGINAL: 0, SKIP: 0 };
+    DATA.rows.forEach(function (r) { verdictCounts[econOf(r).verdict]++; });
     var html = '<h1>Token Radar</h1>' +
       '<p class="lede">A screener for pre-token protocols, ranked by what a launch would be worth. ' +
       '<b>' + DATA.rows.length + ' rows</b>, top implied value <b>' + money(DATA.rows[0].implied_value_usd) + '</b> (' + esc(DATA.rows[0].name) + '), ' +
-      '<b>' + farmCount + ' FARM</b> at a $' + state.ticket.toLocaleString('en-US') + ' ticket and a ' + state.drop + '% airdrop share. ' +
+      '<b>' + farmCount + ' FARM</b> at capital ' + state.capPct + '% of TVL ($100–$50,000) and a ' + state.drop + '% airdrop share. ' +
       'The value comes from a curve fitted on the snapshot&rsquo;s own ' + DATA.fit.comparables + ' traded tokens, ' +
       'and the curve misses by ' + mult(DATA.fit.loo_median_miss) + ' leave-one-out against ' + mult(DATA.fit.flat_loo_median_miss) + ' for a flat multiple. ' +
       'Snapshot ' + esc(DATA.as_of) + ', ' + esc(DATA.source) + ', floor ' + money(DATA.floor_usd) + '.</p>' +
@@ -261,10 +264,12 @@
       '<input type="search" id="q" placeholder="Search name or slug" value="' + esc(state.q) + '" aria-label="Search">' +
       '<select id="cat" aria-label="Category"><option value="all">All categories</option>' + cats.map(function (c) { return '<option value="' + esc(c) + '"' + (state.category === c ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>' +
       '<select id="chain" aria-label="Chain"><option value="all">All chains</option>' + chains.map(function (c) { return '<option value="' + esc(c) + '"' + (state.chain === c ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>' +
-      '<select id="verdict" aria-label="Verdict"><option value="all">All verdicts</option>' +
-      ['FARM', 'MARGINAL', 'SKIP'].map(function (v) { return '<option value="' + v + '"' + (state.verdict === v ? ' selected' : '') + '>' + v + '</option>'; }).join('') + '</select>' +
-      '<label>Ticket <select id="ticket">' + [100, 500, 1000, 5000, 10000].map(function (t) { return '<option value="' + t + '"' + (state.ticket === t ? ' selected' : '') + '>$' + t.toLocaleString('en-US') + '</option>'; }).join('') + '</select></label>' +
-      '<label>Drop <select id="drop">' + [5, 10, 15, 20].map(function (d) { return '<option value="' + d + '"' + (state.drop === d ? ' selected' : '') + '>' + d + '%</option>'; }).join('') + '</select></label>' +
+      '<span class="vtabs" role="group" aria-label="Verdict">' +
+      '<button type="button" data-verdict="all"' + (state.verdict === 'all' ? ' class="on"' : '') + '>All ' + DATA.rows.length + '</button>' +
+      ['FARM', 'MARGINAL', 'SKIP'].map(function (v) { return '<button type="button" data-verdict="' + v + '"' + (state.verdict === v ? ' class="on"' : '') + '>' + v + ' ' + verdictCounts[v] + '</button>'; }).join('') +
+      '</span>' +
+      '<label>Capital <select id="cap">' + [0.005, 0.01, 0.02, 0.05].map(function (c) { return '<option value="' + c + '"' + (state.capPct === c ? ' selected' : '') + '>' + c + '% of TVL</option>'; }).join('') + '</select></label>' +
+      '<label>Drop <select id="drop">' + [5, 7, 10, 15, 20].map(function (d) { return '<option value="' + d + '"' + (state.drop === d ? ' selected' : '') + '>' + d + '%</option>'; }).join('') + '</select></label>' +
       '<label><input type="checkbox" id="wl"' + (state.watchlist ? ' checked' : '') + '> Watchlist only</label>' +
       '<span class="tabs"><button type="button" data-tab="pre-token"' + (state.tab === 'pre-token' ? ' class="on"' : '') + '>Pre-token</button>' +
       '<button type="button" data-tab="live"' + (state.tab === 'live' ? ' class="on"' : '') + '>Live tokens (' + DATA.live.length + ')</button></span>' +
@@ -289,36 +294,43 @@
     html += '<footer>Token Radar ' + esc(DATA.model_version) + ' · snapshot ' + esc(DATA.as_of) + ' · ' +
       'implied value = launch value from the fitted curve x token odds from the peer table · ' +
       'range = P10–P90 of the leave-one-out residuals · ' +
-      'verdict at $' + state.ticket.toLocaleString('en-US') + ' ticket, ' + state.drop + '% airdrop share, 8 transactions, 2.5 hours.</footer>';
+      'verdict at capital ' + state.capPct + '% of TVL ($100–$50,000), ' + state.drop + '% airdrop share, 8 transactions, 2.5 hours.</footer>';
     return html;
   }
 
   function evidenceHtml() {
     var f = DATA.fit, o = DATA.odds;
     var html = '<h2>How the value is worked out</h2>' +
-      '<p><span class="formula">implied = 10^(' + f.intercept.toFixed(4) + ' + ' + f.slope.toFixed(4) + ' x log10(TVL)) x token odds</span></p>' +
+      '<p><span class="formula">implied = 10^(' + f.intercept.toFixed(4) + ' + ' + f.slope.toFixed(4) + ' x log10(TVL) + family offset) x token odds</span></p>' +
       '<p class="note">The curve is fitted on the ' + f.comparables + ' traded tokens in this snapshot — no protocol name is special-cased, and the same curve prices every row. ' +
       'Token odds come from the peer table: the share of protocols in the same age band and TVL tier that record a token, shrunk toward the base rate of ' + (o.base_rate * 100).toFixed(1) + '% (' + o.base_with_token + ' of ' + o.base_peers + ' peers). ' +
-      'The range is the P10–P90 of the leave-one-out residuals, ' + f.resid_p10.toFixed(3) + ' to +' + f.resid_p90.toFixed(3) + ' in log10, and it holds ' + Math.round(f.range_coverage * 100) + '% of the traded tokens.</p>' +
-      '<h3>Blind tests — the curve against a flat multiple</h3>' +
-      '<table class="ev"><thead><tr><th>Test</th><th class="num">Curve miss</th><th class="num">Flat miss</th><th class="num">Within 3x</th><th class="num">n</th></tr></thead><tbody>' +
-      '<tr><td>Leave-one-out</td><td class="num">' + mult(f.loo_median_miss) + '</td><td class="num">' + mult(f.flat_loo_median_miss) + '</td><td class="num">' + Math.round(f.loo_within_3x * 100) + '%</td><td class="num">' + f.comparables + '</td></tr>' +
-      '<tr><td>Walk-forward, pooled</td><td class="num">' + mult(f.walk_pooled_median_miss) + '</td><td class="num">' + mult(f.flat_walk_pooled_median_miss) + '</td><td class="num">—</td><td class="num">' + f.walk_pooled_n + '</td></tr>' +
-      '<tr><td>Token odds, Brier score (lower is better)</td><td class="num">' + o.brier.toFixed(3) + '</td><td class="num">' + o.brier_flat.toFixed(3) + '</td><td class="num">—</td><td class="num">' + o.base_peers + '</td></tr>' +
+      'The range is the P10–P90 of the leave-one-out residuals, ' + f.resid_p10.toFixed(3) + ' to +' + f.resid_p90.toFixed(3) + ' in log10, and it holds ' + Math.round(f.range_coverage * 100) + '% of the traded tokens — and ' + Math.round(f.walk_range_p10_p90 * 100) + '% of the later-listed tokens in the walk-forward test, so the range is checked on held-out data, not only on the tokens that fitted it. The narrower P25–P75 range holds ' + Math.round(f.walk_range_p25_p75 * 100) + '% of later-listed tokens (stated 50%).</p>' +
+      '<h3>Family effect — the one term that passed both blind tests</h3>' +
+      '<table class="ev"><thead><tr><th>Family</th><th class="num">Traded tokens</th><th class="num">Offset</th><th class="num">Multiplier</th></tr></thead><tbody>' +
+      f.family_offsets.map(function (g) {
+        return '<tr><td>' + esc(g.family) + '</td><td class="num">' + g.n + '</td><td class="num">' + (g.offset >= 0 ? '+' : '') + g.offset.toFixed(3) + '</td><td class="num">x' + Math.pow(10, g.offset).toFixed(2) + '</td></tr>';
+      }).join('') + '</tbody></table>' +
+      '<p class="note">The 28 snapshot categories group into 7 families, and the family effect is shrunk by ridge regression (lambda ' + f.family_lambda + ') so no small family can swing a row on its own. It is a weak pass: leave-one-out ' + mult(f.loo_median_miss) + ' against the bare curve&rsquo;s ' + mult(f.bare_loo_median_miss) + ', walk-forward ' + mult(f.walk_pooled_median_miss) + ' against ' + mult(f.bare_walk_pooled_median_miss) + ', and the paired leave-one-out count favours it 54 to 38 — and lambda 40 passes too, so the gain is not a single lucky penalty. The 2024 and 2026 folds worsen, so the gain is not overstated.</p>' +
+      '<h3>Blind tests — the curve against a flat multiple, and against the bare curve</h3>' +
+      '<table class="ev"><thead><tr><th>Test</th><th class="num">Curve miss</th><th class="num">Bare curve miss</th><th class="num">Flat miss</th><th class="num">Within 3x</th><th class="num">n</th></tr></thead><tbody>' +
+      '<tr><td>Leave-one-out</td><td class="num">' + mult(f.loo_median_miss) + '</td><td class="num">' + mult(f.bare_loo_median_miss) + '</td><td class="num">' + mult(f.flat_loo_median_miss) + '</td><td class="num">' + Math.round(f.loo_within_3x * 100) + '%</td><td class="num">' + f.comparables + '</td></tr>' +
+      '<tr><td>Walk-forward, pooled</td><td class="num">' + mult(f.walk_pooled_median_miss) + '</td><td class="num">' + mult(f.bare_walk_pooled_median_miss) + '</td><td class="num">' + mult(f.flat_walk_pooled_median_miss) + '</td><td class="num">—</td><td class="num">' + f.walk_pooled_n + '</td></tr>' +
+      '<tr><td>Token odds, Brier score (lower is better)</td><td class="num">' + o.brier.toFixed(3) + '</td><td class="num">—</td><td class="num">' + o.brier_flat.toFixed(3) + '</td><td class="num">—</td><td class="num">' + o.base_peers + '</td></tr>' +
       '</tbody></table>' +
+      '<p class="note">The odds call ' + o.called_right + ' of ' + o.base_peers + ' peers right at the 50% line (' + (o.called_right / o.base_peers * 100).toFixed(1) + '%), against ' + o.called_right_flat + ' (' + (o.called_right_flat / o.base_peers * 100).toFixed(1) + '%) for the base rate alone.</p>' +
       '<h3>Walk-forward folds — fit on older tokens, tested on the next year</h3>' +
       '<table class="ev"><thead><tr><th>Test year</th><th class="num">Fit on</th><th class="num">Tested</th><th class="num">Curve miss</th><th class="num">Flat miss</th><th class="num">Within 3x</th></tr></thead><tbody>' +
       f.walk_folds.map(function (w) {
         return '<tr><td>' + esc(w.cut.slice(0, 4)) + '</td><td class="num">' + w.fit_n + '</td><td class="num">' + w.test_n + '</td><td class="num">' + mult(w.median_miss) + '</td><td class="num">' + mult(w.flat_median_miss) + '</td><td class="num">' + Math.round(w.within_3x * 100) + '%</td></tr>';
       }).join('') + '</tbody></table>' +
-      (f.walk_folds.length ? '<p class="note">The newest fold, ' + esc(f.walk_folds[f.walk_folds.length - 1].cut.slice(0, 4)) + ', is the hardest — nine recent tokens, and the curve still beats the flat multiple there, ' + mult(f.walk_folds[f.walk_folds.length - 1].median_miss) + ' against ' + mult(f.walk_folds[f.walk_folds.length - 1].flat_median_miss) + '.</p>' : '');
+      (f.walk_folds.length ? '<p class="note">The newest fold, ' + esc(f.walk_folds[f.walk_folds.length - 1].cut.slice(0, 4)) + ', is the hardest — nine recent tokens with extreme dispersion, and the curve loses to the flat multiple there, ' + mult(f.walk_folds[f.walk_folds.length - 1].median_miss) + ' against ' + mult(f.walk_folds[f.walk_folds.length - 1].flat_median_miss) + '. The pooled walk-forward still beats flat, ' + mult(f.walk_pooled_median_miss) + ' against ' + mult(f.flat_walk_pooled_median_miss) + ', because the three earlier folds win by more — but the newest cohort is where the model is weakest, and the board says so rather than hiding it.</p>' : '');
     if (f.rejected.length) {
-      html += '<h3>Terms tested and rejected — they did not beat the bare curve in both blind tests</h3>' +
-        '<table class="ev"><thead><tr><th>Term</th><th class="num">Leave-one-out miss</th><th class="num">Walk-forward miss</th></tr></thead><tbody>' +
+      html += '<h3>Terms tested and rejected</h3>' +
+        '<table class="ev"><thead><tr><th>Term</th><th class="num">Leave-one-out miss</th><th class="num">Walk-forward miss</th><th>Why not</th></tr></thead><tbody>' +
         f.rejected.map(function (r) {
-          return '<tr><td>' + esc(r.term) + '</td><td class="num">' + mult(r.loo_median_miss) + '</td><td class="num">' + mult(r.walk_median_miss) + '</td></tr>';
+          return '<tr><td>' + esc(r.term) + '</td><td class="num">' + mult(r.loo_median_miss) + '</td><td class="num">' + mult(r.walk_median_miss) + '</td><td>' + esc(r.reason) + '</td></tr>';
         }).join('') + '</tbody></table>' +
-        '<p class="note">The bare curve misses by ' + mult(f.loo_median_miss) + ' leave-one-out and ' + mult(f.walk_pooled_median_miss) + ' walk-forward. A term is kept only when it beats both; none of these did.</p>';
+        '<p class="note">The bare curve misses by ' + mult(f.bare_loo_median_miss) + ' leave-one-out and ' + mult(f.bare_walk_pooled_median_miss) + ' walk-forward. A term is kept only when it beats the current model in both blind tests; the family effect above is the one that did.</p>';
     }
     html += '<h3>Token odds by age and size — peers, with token, odds</h3>' +
       '<table class="ev"><thead><tr><th>Age band</th><th>TVL tier</th><th class="num">Peers</th><th class="num">With token</th><th class="num">Odds</th></tr></thead><tbody>' +
@@ -326,6 +338,12 @@
         return '<tr><td>' + esc(c.age_band) + '</td><td>' + esc(c.tvl_tier) + '</td><td class="num">' + c.peers + '</td><td class="num">' + c.with_token + '</td><td class="num">' + Math.round(c.odds * 100) + '%</td></tr>';
       }).join('') + '</tbody></table>' +
       '<p class="note">Each cell is shrunk toward the base rate with a strength of ' + o.shrink + ' peers, so a small cell cannot swing a row&rsquo;s odds on its own.</p>' +
+      '<h3>Set aside — ' + DATA.set_aside.reduce(function (s, g) { return s + g.count; }, 0) + ' pre-token protocols left out of the ranking, by reason</h3>' +
+      '<table class="ev"><thead><tr><th>Reason</th><th class="num">Protocols</th></tr></thead><tbody>' +
+      DATA.set_aside.map(function (g) {
+        return '<tr><td>' + esc(g.reason) + '</td><td class="num">' + g.count + '</td></tr>';
+      }).join('') + '</tbody></table>' +
+      '<p class="note">These record no token, but they are a wrapped, staked or bridged product of a token that already trades — or an exchange&rsquo;s product, or a versioned pool — so they are not launches waiting to happen. The ledger counts ' + DATA.ledger.filter(function (g) { return g.kind === 'token'; })[0].count + ' protocols that already record a token, ' + DATA.rows.length + ' ranked, and these ' + DATA.set_aside.reduce(function (s, g) { return s + g.count; }, 0) + ' set aside, which is every protocol in the snapshot.</p>' +
       scatter();
     return html;
   }
@@ -338,30 +356,31 @@
     var vclass = e.verdict === 'FARM' ? 'verdict-farm' : e.verdict === 'MARGINAL' ? 'verdict-marginal' : 'verdict-skip';
     return '<div class="detail"><a class="back" href="?">&larr; Back to the board</a>' +
       '<h1>' + esc(row.name) + '</h1>' +
-      '<p class="muted mono">' + esc(row.slug) + ' · rank ' + row.rank + ' of ' + DATA.rows.length + (WATCH.has(row.slug) ? ' · watchlist' : '') + '</p>' +
+      '<p class="muted mono">' + esc(row.slug) + ' · rank ' + row.rank + ' of ' + DATA.rows.length + ' (' + row.rank_low + '–' + row.rank_high + ' at the P25–P75 range)' + (WATCH.has(row.slug) ? ' · watchlist' : '') + '</p>' +
       '<div class="facts">' +
       '<span>Implied value <b>' + moneyFull(row.implied_value_usd) + '</b></span>' +
       '<span>Range P10–P90 <b>' + money(row.range_low_usd) + '–' + money(row.range_high_usd) + '</b></span>' +
       '<span>Token odds <b>' + Math.round(row.token_odds * 100) + '%</b> <span class="faint">(' + esc(row.odds_cell) + ')</span></span>' +
       '<span>Launch value <b>' + moneyFull(row.launch_value_usd) + '</b></span>' +
+      '<span>Family <b>' + esc(row.family) + ' x' + Math.pow(10, row.family_offset).toFixed(2) + '</b></span>' +
       '<span>TVL <b>' + moneyFull(row.tvl_usd) + '</b></span>' +
       '<span>7d <b>' + (row.change_7d === null ? 'n/a' : pct(row.change_7d)) + '</b></span>' +
       '<span>Age <b>' + ageFmt(row.age_days) + '</b></span>' +
       '<span>Category <b>' + esc(row.category || 'Other') + '</b></span>' +
       '<span>Chains <b>' + esc((row.chains || []).join(', ')) + '</b></span>' +
       '</div>' +
-      '<h2>Economics — at a $' + state.ticket.toLocaleString('en-US') + ' ticket and a ' + state.drop + '% airdrop share</h2>' +
-      '<p class="note">Expected slice <b>' + money2(e.slice) + '</b> = implied x ' + state.drop + '% x ($' + state.ticket.toLocaleString('en-US') + ' / TVL). ' +
+      '<h2>Economics — at $' + e.capital.toLocaleString('en-US') + ' of capital (' + state.capPct + '% of TVL) and a ' + state.drop + '% airdrop share</h2>' +
+      '<p class="note">Expected slice <b>' + money2(e.slice) + '</b> = implied x ' + state.drop + '% x ($' + e.capital.toLocaleString('en-US') + ' / TVL). ' +
       'Fees <b>' + money2(e.fees) + '</b> = 8 transactions on ' + esc(row.farm_chain) + ' at $' + row.farm_gas_usd + ' each. ' +
       'Net <b>' + money2(e.net) + '</b>, or <b>' + money2(e.perHour) + ' an hour</b> over 2.5 hours. ' +
       'Verdict: <span class="' + vclass + '">' + e.verdict + '</span> — FARM beats $25 an hour, MARGINAL is positive but below that bar, SKIP means the fees eat the slice. ' +
-      'Change the ticket or the drop share on the board and the verdict here follows.</p>' +
+      'Change the capital share or the drop share on the board and the verdict here follows.</p>' +
       '<h2>Farm plan — ' + row.farm_steps.length + ' steps</h2>' +
       '<ol class="plan">' + row.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>' +
       '<h2>Where the number comes from</h2>' +
-      '<p class="note">Launch value ' + moneyFull(row.launch_value_usd) + ' from the fitted curve (10^' + DATA.fit.intercept.toFixed(4) + ' x TVL^' + DATA.fit.slope.toFixed(4) + ', fitted on ' + DATA.fit.comparables + ' traded tokens), ' +
+      '<p class="note">Launch value ' + moneyFull(row.launch_value_usd) + ' from the fitted curve (10^' + DATA.fit.intercept.toFixed(4) + ' x TVL^' + DATA.fit.slope.toFixed(4) + ' x the ' + esc(row.family) + ' family offset x' + Math.pow(10, row.family_offset).toFixed(2) + ', fitted on ' + DATA.fit.comparables + ' traded tokens), ' +
       'times token odds ' + Math.round(row.token_odds * 100) + '% from the peer cell &ldquo;' + esc(row.odds_cell) + '&rdquo;. ' +
-      'The range is the leave-one-out P10–P90, which holds ' + Math.round(DATA.fit.range_coverage * 100) + '% of the traded tokens.</p>' +
+      'The range is the leave-one-out P10–P90, which holds ' + Math.round(DATA.fit.range_coverage * 100) + '% of the traded tokens, and ' + Math.round(DATA.fit.walk_range_p10_p90 * 100) + '% of later-listed tokens.</p>' +
       '</div>';
   }
 
@@ -373,12 +392,13 @@
     if (cat) cat.addEventListener('change', function () { state.category = cat.value; syncUrl(); render(); });
     var chain = document.getElementById('chain');
     if (chain) chain.addEventListener('change', function () { state.chain = chain.value; syncUrl(); render(); });
-    var verdict = document.getElementById('verdict');
-    if (verdict) verdict.addEventListener('change', function () { state.verdict = verdict.value; syncUrl(); render(); });
-    var ticket = document.getElementById('ticket');
-    if (ticket) ticket.addEventListener('change', function () { state.ticket = Number(ticket.value); syncUrl(); render(); });
+    var cap = document.getElementById('cap');
+    if (cap) cap.addEventListener('change', function () { state.capPct = Number(cap.value); syncUrl(); render(); });
     var drop = document.getElementById('drop');
     if (drop) drop.addEventListener('change', function () { state.drop = Number(drop.value); syncUrl(); render(); });
+    Array.prototype.forEach.call(app.querySelectorAll('[data-verdict]'), function (b) {
+      b.addEventListener('click', function () { state.verdict = b.getAttribute('data-verdict'); syncUrl(); render(); });
+    });
     var wl = document.getElementById('wl');
     if (wl) wl.addEventListener('change', function () { state.watchlist = wl.checked; syncUrl(); render(); });
     Array.prototype.forEach.call(app.querySelectorAll('[data-tab]'), function (b) {
